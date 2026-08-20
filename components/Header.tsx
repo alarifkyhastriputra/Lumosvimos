@@ -112,7 +112,7 @@ const Header: React.FC<HeaderProps> = ({
               </div>
               <div className="max-h-60 overflow-y-auto">
                 {results.map(user => {
-                  const fallbackPhoto = `https://api.dicebear.com/7.x/initials/svg?seed=${user.name || 'Shadow'}&backgroundColor=000000&fontFamily=Inter&fontWeight=700`;
+                  const fallbackPhoto = `https://api.dicebear.com/7.x/initials/svg?seed=${user.name || 'Orbit'}&backgroundColor=000000&fontFamily=Inter&fontWeight=700`;
                   return (
                     <div 
                       key={user.id}

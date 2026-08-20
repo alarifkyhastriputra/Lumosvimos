@@ -7,6 +7,7 @@ interface NotificationsProps {
   currentUser: User;
   onFollow: (userId: string) => void;
   onUserClick: (userId: string) => void;
+  onPostClick?: (postId: string) => void;
   onClearAll: () => void;
   users: User[];
 }
@@ -16,23 +17,26 @@ export default function Notifications({
   currentUser, 
   onFollow, 
   onUserClick, 
+  onPostClick,
   onClearAll,
   users
 }: NotificationsProps) {
   const timeAgo = (timestamp: number) => {
     const seconds = Math.floor((Date.now() - timestamp) / 1000);
-    if (seconds < 60) return 'Just now';
-    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-    if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-    return `${Math.floor(seconds / 86400)}d ago`;
+    if (seconds < 60) return 'Baru saja';
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m lalu`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)}j lalu`;
+    return `${Math.floor(seconds / 86400)}h lalu`;
   };
 
-  const getActionText = (type: string) => {
-    switch (type) {
-      case 'follow': return 'started following you.';
-      case 'like': return 'liked your echo.';
-      case 'comment': return 'commented on your echo.';
-      default: return 'interacted with you.';
+  const getActionText = (notif: UserNotification) => {
+    switch (notif.type) {
+      case 'follow': return 'mulai mengikuti Anda.';
+      case 'like': return 'menyukai postingan Anda.';
+      case 'comment': return 'mengomentari postingan Anda.';
+      case 'reply': return 'membalas komentar Anda.';
+      case 'mention': return 'menandai Anda dalam komentar:';
+      default: return 'berinteraksi dengan Anda.';
     }
   };
 
@@ -41,6 +45,8 @@ export default function Notifications({
       case 'follow': return <i className="fas fa-user-plus text-black"></i>;
       case 'like': return <i className="fas fa-heart text-red-500"></i>;
       case 'comment': return <i className="fas fa-comment text-blue-500"></i>;
+      case 'reply': return <i className="fas fa-reply text-indigo-500"></i>;
+      case 'mention': return <i className="fas fa-at text-emerald-500"></i>;
       default: return <i className="fas fa-bell text-gray-400"></i>;
     }
   };
@@ -50,7 +56,7 @@ export default function Notifications({
       <div className="flex items-center justify-between mb-8">
         <div>
           <h2 className="text-3xl font-black uppercase tracking-tighter">Echoes</h2>
-          <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Recent activity in your shadow</p>
+          <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Recent activity in your orbit</p>
         </div>
         {notifications.some(n => !n.read) && (
           <button 
@@ -72,15 +78,21 @@ export default function Notifications({
           {notifications.map((notif) => {
             const isFollowingBack = (currentUser.following || []).includes(notif.senderId);
             const senderUser = users.find(u => u.id === notif.senderId);
+            const hasPost = Boolean(notif.postId);
 
             return (
               <div 
                 key={notif.id} 
-                className={`flex items-center p-4 rounded-2xl border transition-all shadow-sm group ${
-                  notif.read ? 'bg-white border-black/5' : 'bg-gray-50 border-black animate-pulse-subtle'
-                }`}
+                onClick={() => {
+                  if (notif.postId && onPostClick) {
+                    onPostClick(notif.postId);
+                  }
+                }}
+                className={`flex items-center p-4 rounded-2xl border transition-all shadow-xs group ${
+                  notif.read ? 'bg-white border-black/5 hover:border-black/20' : 'bg-neutral-50/80 border-black/30 animate-pulse-subtle'
+                } ${hasPost ? 'cursor-pointer hover:bg-neutral-50/90 active:scale-[0.99]' : ''}`}
               >
-                <div className="relative">
+                <div className="relative shrink-0">
                   <img 
                     src={notif.senderPhoto} 
                     alt={notif.senderName} 
@@ -96,10 +108,10 @@ export default function Notifications({
                 </div>
 
                 <div className="flex-1 min-w-0 ml-4">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <p className="text-sm font-medium">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <p className="text-sm font-medium leading-snug">
                       <span 
-                        className="font-black uppercase tracking-tighter cursor-pointer hover:underline" 
+                        className="font-black uppercase tracking-tighter cursor-pointer hover:underline text-neutral-900" 
                         onClick={(e) => {
                           e.stopPropagation();
                           onUserClick(notif.senderId);
@@ -112,14 +124,36 @@ export default function Notifications({
                            {senderUser.role}
                          </span>
                       )}
-                      <span className="text-gray-500 ml-1">
-                        {getActionText(notif.type)}
+                      <span className="text-gray-600 ml-1">
+                        {getActionText(notif)}
                       </span>
                     </p>
                   </div>
-                  <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest mt-0.5">
-                    {timeAgo(notif.timestamp)}
-                  </p>
+
+                  {/* Preview comment text or post text if available */}
+                  {notif.commentText && (
+                    <p className="text-xs text-neutral-800 font-semibold bg-black/5 px-2.5 py-1 rounded-lg mt-1 inline-block max-w-full truncate border border-black/5">
+                      "{notif.commentText}"
+                    </p>
+                  )}
+
+                  {notif.postText && !notif.commentText && (
+                    <p className="text-xs text-neutral-500 italic mt-0.5 truncate">
+                      "{notif.postText}"
+                    </p>
+                  )}
+
+                  <div className="flex items-center space-x-2 mt-1">
+                    <span className="text-[9px] font-black text-gray-400 uppercase tracking-widest">
+                      {timeAgo(notif.timestamp)}
+                    </span>
+                    {hasPost && (
+                      <span className="text-[9px] font-bold text-neutral-600 bg-neutral-100 px-1.5 py-0.5 rounded-full flex items-center space-x-1 group-hover:bg-black group-hover:text-white transition-colors">
+                        <i className="fas fa-arrow-right text-[7px]"></i>
+                        <span>Buka Postingan</span>
+                      </span>
+                    )}
+                  </div>
                 </div>
                 
                 {notif.type === 'follow' && (
@@ -128,7 +162,7 @@ export default function Notifications({
                       e.stopPropagation();
                       onFollow(notif.senderId);
                     }}
-                    className={`ml-2 px-4 py-2 rounded-full text-[10px] font-black uppercase tracking-widest transition-all border-2 ${
+                    className={`ml-2 px-4 py-2 rounded-full text-[10px] font-black uppercase tracking-widest transition-all border-2 shrink-0 ${
                       isFollowingBack 
                         ? 'border-gray-100 text-gray-300 pointer-events-none' 
                         : 'border-black bg-black text-white hover:opacity-80 active:scale-90 shadow-sm'

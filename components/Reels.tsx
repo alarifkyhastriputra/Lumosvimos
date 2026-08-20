@@ -49,7 +49,7 @@ const ReelItem: React.FC<{
       <video 
         ref={videoRef}
         src={post.videoURL} 
-        preload="auto"
+        preload={isActive ? "auto" : "metadata"}
         className="absolute inset-0 w-full h-full object-contain"
         loop
         muted={isMuted}

@@ -133,7 +133,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({
               <textarea 
                 value={broadcastText}
                 onChange={(e) => setBroadcastText(e.target.value)}
-                placeholder="What must the shadows know?"
+                placeholder="What must the Orbit know?"
                 className="w-full bg-gray-50 border-2 border-black rounded-2xl p-4 text-sm font-bold focus:outline-none focus:bg-white transition-all h-32 resize-none"
               />
             </div>

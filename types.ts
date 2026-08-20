@@ -56,8 +56,12 @@ export interface Comment {
   id: string;
   userId: string;
   userName: string;
+  userPhoto?: string;
   text: string;
   timestamp: number;
+  replyToId?: string;
+  replyToUserName?: string;
+  replyToUserId?: string;
 }
 
 export interface ChatMessage {
@@ -72,7 +76,10 @@ export interface UserNotification {
   senderId: string;
   senderName: string;
   senderPhoto: string;
-  type: 'follow' | 'like' | 'comment';
+  type: 'follow' | 'like' | 'comment' | 'mention' | 'reply';
+  postId?: string;
+  postText?: string;
+  commentText?: string;
   timestamp: number;
   read: boolean;
 }

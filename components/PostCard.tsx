@@ -1,12 +1,12 @@
 
-import React, { useState } from 'react';
-import { Post, User } from '../types';
+import React, { useState, useRef } from 'react';
+import { Post, User, Comment } from '../types';
 
 interface PostCardProps {
   post: Post;
   onLike: (postId: string) => void;
   onDislike: (postId: string) => void;
-  onComment: (postId: string, text: string) => void;
+  onComment: (postId: string, text: string, replyTo?: { commentId?: string; userName?: string; userId?: string }) => void;
   onUserClick: (userId: string) => void;
   currentUser: User;
   onFollow: (userId: string) => void;
@@ -20,8 +20,11 @@ const PostCard: React.FC<PostCardProps> = ({
 }) => {
   const [showComments, setShowComments] = useState(false);
   const [commentText, setCommentText] = useState('');
+  const [replyingTo, setReplyingTo] = useState<{ commentId: string; userName: string; userId: string } | null>(null);
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [isZoomed, setIsZoomed] = useState(false);
   const [isPlayingMusic, setIsPlayingMusic] = useState(false);
+  const commentInputRef = useRef<HTMLInputElement>(null);
   
   const postUser = users.find(u => u.id === post.userId);
   const isFollowing = (currentUser.following || []).includes(post.userId);
@@ -39,12 +42,112 @@ const PostCard: React.FC<PostCardProps> = ({
     minute: '2-digit'
   });
 
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setCommentText(val);
+
+    const selectionPos = e.target.selectionStart || val.length;
+    const textBeforeCursor = val.slice(0, selectionPos);
+    const match = textBeforeCursor.match(/@([\w.-]*)$/);
+
+    if (match) {
+      setMentionQuery(match[1]);
+    } else {
+      setMentionQuery(null);
+    }
+  };
+
+  const handleSelectMention = (user: User) => {
+    const safeName = (user.name || 'User').replace(/\s+/g, '_');
+    if (commentInputRef.current) {
+      const cursorPos = commentInputRef.current.selectionStart || commentText.length;
+      const textBefore = commentText.slice(0, cursorPos);
+      const textAfter = commentText.slice(cursorPos);
+      const replacedBefore = textBefore.replace(/@([\w.-]*)$/, `@${safeName} `);
+      const newText = replacedBefore + textAfter;
+      setCommentText(newText);
+      setMentionQuery(null);
+      setTimeout(() => {
+        if (commentInputRef.current) {
+          commentInputRef.current.focus();
+          commentInputRef.current.setSelectionRange(replacedBefore.length, replacedBefore.length);
+        }
+      }, 10);
+    } else {
+      setCommentText(prev => prev + `@${safeName} `);
+      setMentionQuery(null);
+    }
+  };
+
   const handleCommentSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (commentText.trim()) {
-      onComment(post.id, commentText);
+      onComment(post.id, commentText.trim(), replyingTo || undefined);
       setCommentText('');
+      setReplyingTo(null);
+      setMentionQuery(null);
     }
+  };
+
+  const handleStartReply = (comment: Comment) => {
+    setReplyingTo({
+      commentId: comment.id,
+      userName: comment.userName || 'Anonymous',
+      userId: comment.userId
+    });
+    setShowComments(true);
+    setTimeout(() => {
+      if (commentInputRef.current) {
+        commentInputRef.current.focus();
+      }
+    }, 50);
+  };
+
+  const filteredMentionUsers = mentionQuery !== null 
+    ? users.filter(u => {
+        const query = mentionQuery.toLowerCase();
+        const name = (u.name || '').toLowerCase();
+        const safeName = name.replace(/\s+/g, '_');
+        return name.includes(query) || safeName.includes(query);
+      }).slice(0, 5)
+    : [];
+
+  const renderCommentText = (text: string) => {
+    if (!text) return null;
+    const parts = text.split(/(@[\w.-]+)/g);
+    return parts.map((part, idx) => {
+      if (part.startsWith('@')) {
+        const mentionHandle = part.slice(1);
+        const matchedUser = users.find(u => {
+          const uClean = (u.name || '').replace(/\s+/g, '_').toLowerCase();
+          const uSimple = (u.name || '').toLowerCase();
+          const handle = mentionHandle.toLowerCase();
+          return uClean === handle || uSimple === handle || u.id === mentionHandle;
+        });
+
+        return (
+          <span
+            key={idx}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (matchedUser) {
+                onUserClick(matchedUser.id);
+              }
+            }}
+            className={`font-black text-[11px] px-1.5 py-0.5 mx-0.5 rounded-md transition-all inline-flex items-center space-x-0.5 ${
+              matchedUser 
+                ? 'bg-neutral-100 hover:bg-black hover:text-white text-neutral-900 cursor-pointer shadow-xs border border-neutral-200/80' 
+                : 'text-neutral-800 font-bold bg-neutral-100/60'
+            }`}
+            title={matchedUser ? `Buka profil @${matchedUser.name}` : undefined}
+          >
+            <span className="text-neutral-400 font-normal mr-0.5">@</span>
+            <span>{matchedUser ? matchedUser.name : mentionHandle}</span>
+          </span>
+        );
+      }
+      return <span key={idx}>{part}</span>;
+    });
   };
 
   return (
@@ -185,8 +288,8 @@ const PostCard: React.FC<PostCardProps> = ({
             <img 
               src={post.photoURL} 
               alt="Content" 
-              loading="eager"
-              fetchPriority="high"
+              loading="lazy"
+              decoding="async"
               className="w-full h-auto max-h-[80vh] object-contain cursor-zoom-in animate-fade-in" 
               onClick={() => setIsZoomed(true)}
             />
@@ -194,7 +297,7 @@ const PostCard: React.FC<PostCardProps> = ({
           {post.videoURL && (
             <video 
               src={post.videoURL} 
-              preload="auto"
+              preload="metadata"
               className="w-full h-auto max-h-[80vh] object-contain" 
               controls={!post.isTakenDown} 
               playsInline 
@@ -241,58 +344,195 @@ const PostCard: React.FC<PostCardProps> = ({
           {!post.isTakenDown && (
             <button 
               onClick={() => {
-                const url = window.location.origin + '?post=' + post.id;
+                const currentUrl = new URL(window.location.href);
+                currentUrl.searchParams.set('post', post.id);
+                const url = currentUrl.toString();
+
                 if (navigator.share) {
                   navigator.share({
-                    title: `Vimos Post by ${post.userName}`,
-                    text: post.text || 'Check out this post on Vimos!',
+                    title: `Postingan Vimos oleh ${post.userName}`,
+                    text: post.text || 'Lihat postingan ini di Vimos!',
                     url: url
                   }).catch(() => {});
+                } else if (navigator.clipboard && navigator.clipboard.writeText) {
+                  navigator.clipboard.writeText(url).then(() => {
+                    alert("Tautan postingan berhasil disalin ke papan klip!");
+                  }).catch(() => {
+                    prompt("Salin tautan postingan ini:", url);
+                  });
                 } else {
-                  navigator.clipboard.writeText(url);
-                  alert("Link copied to clipboard!");
+                  prompt("Salin tautan postingan ini:", url);
                 }
               }}
-              className="flex items-center space-x-2 text-gray-500 hover:text-black"
+              title="Bagikan Postingan"
+              className="flex items-center space-x-1.5 text-gray-500 hover:text-black transition-colors px-2 py-1 rounded-full hover:bg-black/5"
             >
-              <i className="far fa-paper-plane"></i>
+              <i className="far fa-paper-plane text-sm"></i>
             </button>
           )}
         </div>
       </div>
 
       {showComments && (
-        <div className="border-t border-black/5 bg-gray-50/50 transition-all">
-          <div className="p-4 space-y-3 max-h-60 overflow-y-auto">
+        <div className="border-t border-black/5 bg-neutral-50/60 transition-all">
+          <div className="p-3 space-y-2.5 max-h-72 overflow-y-auto">
             {(post.comments || []).length === 0 ? (
-              <p className="text-[10px] text-gray-400 italic text-center py-2 uppercase tracking-widest">No thoughts shared yet</p>
+              <div className="text-center py-6">
+                <i className="far fa-comments text-2xl text-neutral-300 mb-1"></i>
+                <p className="text-[10px] text-neutral-400 font-bold uppercase tracking-wider">Belum ada komentar. Jadilah yang pertama!</p>
+              </div>
             ) : (
-              (post.comments || []).map((comment) => (
-                <div key={comment.id} className="text-sm bg-white p-2 rounded-xl border border-black/5 shadow-sm">
-                  <span className="font-bold text-[10px] uppercase tracking-tighter mr-2">{comment.userName}</span>
-                  <span className="text-gray-700">{comment.text}</span>
-                </div>
-              ))
+              (post.comments || []).map((comment) => {
+                const commentUser = users.find(u => u.id === comment.userId);
+                const commentAvatar = comment.userPhoto || commentUser?.photoURL || `https://api.dicebear.com/7.x/initials/svg?seed=${comment.userName}&backgroundColor=000000&fontFamily=Inter&fontWeight=700`;
+
+                return (
+                  <div 
+                    key={comment.id} 
+                    className="bg-white p-3 rounded-2xl border border-black/5 shadow-xs transition-all hover:border-black/15 group"
+                  >
+                    <div className="flex items-start justify-between space-x-2">
+                      <div className="flex items-start space-x-2.5 flex-1 min-w-0">
+                        <img 
+                          src={commentAvatar} 
+                          alt={comment.userName}
+                          className="w-7 h-7 rounded-full object-cover shrink-0 cursor-pointer border border-neutral-100 mt-0.5"
+                          onClick={() => onUserClick(comment.userId)}
+                        />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center space-x-1.5 flex-wrap">
+                            <span 
+                              onClick={() => onUserClick(comment.userId)}
+                              className="font-extrabold text-[11px] hover:underline cursor-pointer text-neutral-900"
+                            >
+                              {comment.userName}
+                            </span>
+
+                            {commentUser?.isAdmin && (
+                              <span className="bg-black text-white text-[6px] font-black px-1 py-0.2 rounded uppercase">
+                                Admin
+                              </span>
+                            )}
+
+                            {comment.replyToUserName && (
+                              <span className="text-[10px] text-neutral-400 font-medium inline-flex items-center space-x-1">
+                                <i className="fas fa-reply text-[8px]"></i>
+                                <span>membalas</span>
+                                <span className="font-bold text-neutral-700">@{comment.replyToUserName}</span>
+                              </span>
+                            )}
+
+                            <span className="text-[9px] text-neutral-400 font-medium ml-auto">
+                              {new Date(comment.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                          </div>
+
+                          <div className="text-xs text-neutral-800 mt-1 leading-relaxed break-words">
+                            {renderCommentText(comment.text)}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Reply button */}
+                      {!post.isTakenDown && (
+                        <button
+                          type="button"
+                          onClick={() => handleStartReply(comment)}
+                          className="text-[10px] font-bold text-neutral-400 hover:text-black px-2 py-1 rounded-full hover:bg-neutral-100 transition-all shrink-0 flex items-center space-x-1"
+                          title="Balas komentar ini"
+                        >
+                          <i className="fas fa-reply text-[9px]"></i>
+                          <span className="hidden sm:inline">Balas</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })
             )}
           </div>
           
           {!post.isTakenDown && (
-            <form onSubmit={handleCommentSubmit} className="p-3 bg-white border-t border-black/5 flex items-center space-x-2">
-              <input 
-                type="text" 
-                value={commentText}
-                onChange={(e) => setCommentText(e.target.value)}
-                placeholder="Add a thought..."
-                className="flex-1 bg-gray-50 border border-black/10 rounded-full px-4 py-1.5 text-xs focus:outline-none focus:border-black transition-all"
-              />
-              <button 
-                type="submit" 
-                disabled={!commentText.trim()}
-                className="w-8 h-8 bg-black text-white rounded-full flex items-center justify-center disabled:opacity-30"
-              >
-                <i className="fas fa-arrow-up text-[10px]"></i>
-              </button>
-            </form>
+            <div className="relative bg-white border-t border-black/5">
+              {/* Replying indicator banner */}
+              {replyingTo && (
+                <div className="flex items-center justify-between px-4 py-1.5 bg-neutral-100 text-xs text-neutral-700 border-b border-neutral-200/80 animate-fade-in">
+                  <div className="flex items-center space-x-1.5 truncate">
+                    <i className="fas fa-reply text-[10px] text-neutral-500"></i>
+                    <span className="text-[11px]">Membalas <strong className="font-bold text-neutral-900">@{replyingTo.userName}</strong></span>
+                  </div>
+                  <button 
+                    type="button" 
+                    onClick={() => setReplyingTo(null)}
+                    className="text-neutral-400 hover:text-neutral-800 text-[10px] font-bold px-1.5 py-0.5 rounded-full hover:bg-neutral-200 transition-all flex items-center space-x-1"
+                  >
+                    <i className="fas fa-times text-[10px]"></i>
+                    <span>Batal</span>
+                  </button>
+                </div>
+              )}
+
+              {/* Tag / Mention suggestions popup */}
+              {mentionQuery !== null && filteredMentionUsers.length > 0 && (
+                <div className="absolute bottom-full left-3 right-3 mb-1 bg-white border border-neutral-200 rounded-2xl shadow-xl z-50 overflow-hidden max-h-48 overflow-y-auto animate-fade-in">
+                  <div className="px-3 py-1.5 bg-neutral-50 border-b border-neutral-100 flex items-center justify-between">
+                    <span className="text-[9px] font-extrabold uppercase tracking-wider text-neutral-400">Tag Teman (@)</span>
+                    <span className="text-[9px] text-neutral-400">Pilih untuk menyebutkan</span>
+                  </div>
+                  {filteredMentionUsers.map(u => {
+                    const uPhoto = u.photoURL || `https://api.dicebear.com/7.x/initials/svg?seed=${u.name}&backgroundColor=000000`;
+                    return (
+                      <button
+                        key={u.id}
+                        type="button"
+                        onClick={() => handleSelectMention(u)}
+                        className="w-full px-3 py-2 flex items-center space-x-2.5 hover:bg-neutral-100 text-left transition-colors border-b border-neutral-50 last:border-0"
+                      >
+                        <img src={uPhoto} alt={u.name} className="w-6 h-6 rounded-full object-cover border border-neutral-200" />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs font-bold text-neutral-900 truncate">@{u.name}</p>
+                          {u.bio && <p className="text-[9px] text-neutral-400 truncate">{u.bio}</p>}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              <form onSubmit={handleCommentSubmit} className="p-2.5 flex items-center space-x-2">
+                {/* Quick mention button */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (commentInputRef.current) {
+                      setCommentText(prev => prev + '@');
+                      setMentionQuery('');
+                      commentInputRef.current.focus();
+                    }
+                  }}
+                  className="w-8 h-8 rounded-full border border-neutral-200 text-neutral-600 hover:text-black hover:border-black flex items-center justify-center text-xs font-black transition-all shrink-0 hover:bg-neutral-50"
+                  title="Tag teman (@)"
+                >
+                  @
+                </button>
+
+                <input 
+                  ref={commentInputRef}
+                  type="text" 
+                  value={commentText}
+                  onChange={handleInputChange}
+                  placeholder={replyingTo ? `Balas @${replyingTo.userName}...` : "Tulis komentar... gunakan @ untuk tag teman"}
+                  className="flex-1 bg-neutral-50 border border-neutral-200 rounded-full px-4 py-2 text-xs focus:outline-none focus:border-black focus:bg-white transition-all placeholder:text-neutral-400"
+                />
+                <button 
+                  type="submit" 
+                  disabled={!commentText.trim()}
+                  className="w-8 h-8 bg-black text-white rounded-full flex items-center justify-center disabled:opacity-20 hover:scale-105 active:scale-95 transition-all shrink-0 shadow-xs"
+                >
+                  <i className="fas fa-arrow-up text-[10px]"></i>
+                </button>
+              </form>
+            </div>
           )}
         </div>
       )}

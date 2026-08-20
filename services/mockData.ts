@@ -4,7 +4,7 @@ import { User, Post } from '../types';
 export const initialUsers: User[] = [
   {
     id: 'u1',
-    name: 'Aiden Shadows',
+    name: 'Aiden Orbit',
     email: 'aiden@vimos.com',
     bio: 'Finding beauty in the absence of color.',
     photoURL: 'https://picsum.photos/200/200?grayscale&random=1',
@@ -38,7 +38,7 @@ export const initialPosts: Post[] = [
   {
     id: 'p1',
     userId: 'u1',
-    userName: 'Aiden Shadows',
+    userName: 'Aiden Orbit',
     userPhoto: 'https://picsum.photos/200/200?grayscale&random=1',
     text: 'Tokyo at night is just a series of contrasting lights.',
     photoURL: 'https://picsum.photos/600/400?grayscale&random=11',

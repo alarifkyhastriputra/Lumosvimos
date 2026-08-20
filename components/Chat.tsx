@@ -940,7 +940,7 @@ const Chat: React.FC<ChatProps> = ({
           />
         </div>
 
-        <p className="text-[10px] font-black uppercase tracking-widest mb-4 opacity-40">Add Mutual Shadows ({mutualFollowers.length})</p>
+        <p className="text-[10px] font-black uppercase tracking-widest mb-4 opacity-40">Add Mutual Orbit Members ({mutualFollowers.length})</p>
         
         <div className="flex-1 overflow-y-auto space-y-2 mb-4 pr-1">
           {mutualFollowers.length === 0 ? (
@@ -1066,9 +1066,9 @@ const Chat: React.FC<ChatProps> = ({
 
         {isAdmin && (
           <div className="mb-10">
-            <h4 className="text-[10px] font-black uppercase tracking-[0.2em] opacity-40 mb-4 px-2">Add Mutual Shadows</h4>
+            <h4 className="text-[10px] font-black uppercase tracking-[0.2em] opacity-40 mb-4 px-2">Add Mutual Orbit Members</h4>
             {mutualNonMembers.length === 0 ? (
-              <p className="text-center text-[10px] text-gray-400 uppercase font-bold py-4">No more mutual shadows to add.</p>
+              <p className="text-center text-[10px] text-gray-400 uppercase font-bold py-4">No more mutual orbit members to add.</p>
             ) : (
               <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
                 {mutualNonMembers.map(u => (
@@ -1188,7 +1188,7 @@ const Chat: React.FC<ChatProps> = ({
           {activeTab === 'direct' && (
             mutualFollowers.length === 0 ? (
               <div className="text-center py-20 text-gray-400 italic text-sm px-6">
-                Direct whispers are only for mutual shadows (who follow each other).
+                Direct whispers are only for mutual orbit members (who follow each other).
               </div>
             ) : (
               mutualFollowers.map(u => (
@@ -1344,7 +1344,7 @@ const Chat: React.FC<ChatProps> = ({
                     className="flex-1 text-left"
                   >
                     <p className="font-bold text-sm uppercase">{g.name}</p>
-                    <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">{g.participants.length} Shadows</p>
+                    <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">{g.participants.length} Orbit Members</p>
                   </button>
                   <i className="fas fa-chevron-right text-gray-200 group-hover:text-black transition-colors"></i>
                 </div>
@@ -1548,7 +1548,7 @@ const Chat: React.FC<ChatProps> = ({
             return (
               <div key={m.id} className={`flex flex-col group relative ${isMe ? 'items-end' : 'items-start animate-fade-in'}`}>
                 {!isMe && selectedRecipient.type === 'group' && (
-                  <span className="text-[8px] font-black uppercase tracking-widest mb-1 ml-1 opacity-40">{sender?.name || 'Shadow'}</span>
+                  <span className="text-[8px] font-black uppercase tracking-widest mb-1 ml-1 opacity-40">{sender?.name || 'Orbit'}</span>
                 )}
                 
                 <div className="flex items-center space-x-2 max-w-[85%] relative">

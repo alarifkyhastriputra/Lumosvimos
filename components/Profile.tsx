@@ -63,7 +63,7 @@ const Profile = ({
   const followingList = users.filter(u => (user.following || []).includes(u.id));
 
   // Fallback data
-  const displayName = user.name && user.name.trim() !== '' ? user.name : 'Unknown Shadow';
+  const displayName = user.name && user.name.trim() !== '' ? user.name : 'Unknown Orbit';
   const displayBio = user.bio && user.bio.trim() !== '' ? user.bio : 'No bio shared yet.';
   const displayPhoto = user.photoURL || `https://api.dicebear.com/7.x/initials/svg?seed=${displayName}&backgroundColor=000000&fontFamily=Inter&fontWeight=700`;
 
@@ -90,7 +90,7 @@ const Profile = ({
     // Note: To keep Profile simple, we'll use a prompt for role name, 
     // but the actual color selection is primarily in AdminPanel.
     // However, if onSetRole is called from here, it will use current color.
-    const role = prompt("Assign a special role to this shadow (e.g., Visionary, Elite, Curator):", user.role || "");
+    const role = prompt("Assign a special role to this member (e.g., Visionary, Elite, Curator):", user.role || "");
     if (role !== null && onSetRole) {
       onSetRole(user.id, role, user.roleColor);
     }

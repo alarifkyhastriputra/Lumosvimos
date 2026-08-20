@@ -12,7 +12,7 @@ interface FeedProps {
   announcements?: Announcement[];
   onLike: (postId: string) => void;
   onDislike: (postId: string) => void;
-  onComment: (postId: string, text: string) => void;
+  onComment: (postId: string, text: string, replyTo?: { commentId?: string; userName?: string; userId?: string }) => void;
   onUserClick: (userId: string) => void;
   currentUser: User;
   onFollow: (userId: string) => void;

@@ -3,7 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { User, Post, LiveStream } from '../types';
 import { useLanguage } from '../LanguageContext';
 import { db } from '../firebase';
-import { ref, onValue } from 'firebase/database';
+import { ref, onValue, query, limitToLast } from 'firebase/database';
 
 interface LeaderboardProps {
   users: User[];
@@ -15,12 +15,17 @@ interface LeaderboardProps {
 export const Leaderboard: React.FC<LeaderboardProps> = ({ users, posts, onUserClick, onStreamClick }) => {
   const { t } = useLanguage();
   const [activeTab, setActiveTab] = useState<'live' | 'post'>('live');
-  const [allLiveStreams, setAllLiveStreams] = useState<LiveStream[]>([]);
+  const [allLiveStreams, setAllLiveStreams] = useState<LiveStream[]>(() => {
+    try {
+      const stored = localStorage.getItem('vimos_all_livestreams');
+      return stored ? JSON.parse(stored) : [];
+    } catch { return []; }
+  });
 
   // Fetch all live streams (both active & ended) to calculate streamer rankings
   useEffect(() => {
-    const streamsRef = ref(db, 'livestreams');
-    const unsubscribe = onValue(streamsRef, (snapshot) => {
+    const streamsQuery = query(ref(db, 'livestreams'), limitToLast(100));
+    const unsubscribe = onValue(streamsQuery, (snapshot) => {
       const data = snapshot.val();
       if (data) {
         const list: LiveStream[] = Object.entries(data).map(([id, val]: [string, any]) => ({
@@ -28,6 +33,7 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({ users, posts, onUserCl
           ...val
         }));
         setAllLiveStreams(list);
+        try { localStorage.setItem('vimos_all_livestreams', JSON.stringify(list)); } catch {}
       } else {
         setAllLiveStreams([]);
       }

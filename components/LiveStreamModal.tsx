@@ -354,7 +354,7 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
 
       if (!newStreamId) throw new Error("Could not create stream key");
 
-      const accountDisplayName = (currentUser.name && currentUser.name !== 'Anonymous Shadow' && currentUser.name !== 'Anonymous')
+      const accountDisplayName = (currentUser.name && currentUser.name !== 'Anonymous Shadow' && currentUser.name !== 'Anonymous Orbit' && currentUser.name !== 'Anonymous')
         ? currentUser.name
         : (currentUser.email ? currentUser.email.split('@')[0] : 'Akun Saya');
 
@@ -642,7 +642,7 @@ export const LiveStreamModal: React.FC<LiveStreamModalProps> = ({
     if (e) e.preventDefault();
     if (!messageText.trim() || !streamId) return;
 
-    const accountDisplayName = (currentUser.name && currentUser.name !== 'Anonymous Shadow' && currentUser.name !== 'Anonymous')
+    const accountDisplayName = (currentUser.name && currentUser.name !== 'Anonymous Shadow' && currentUser.name !== 'Anonymous Orbit' && currentUser.name !== 'Anonymous')
       ? currentUser.name
       : (currentUser.email ? currentUser.email.split('@')[0] : 'Akun Saya');
 

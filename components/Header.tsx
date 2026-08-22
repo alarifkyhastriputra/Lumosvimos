@@ -2,6 +2,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { User } from '../types';
 import { useLanguage } from '../LanguageContext';
+import { db } from '../firebase';
+import { ref, onValue } from 'firebase/database';
 
 interface HeaderProps {
   onSearch: (term: string) => void;
@@ -9,6 +11,7 @@ interface HeaderProps {
   onUserClick: (userId: string) => void;
   onLeaderboardClick: () => void;
   onShopClick?: () => void;
+  onAIClick?: () => void;
   isAdmin?: boolean;
   onAdminClick?: () => void;
   onLiveClick?: () => void;
@@ -22,6 +25,7 @@ const Header: React.FC<HeaderProps> = ({
   onUserClick, 
   onLeaderboardClick, 
   onShopClick,
+  onAIClick,
   isAdmin, 
   onAdminClick,
   onLiveClick,
@@ -31,7 +35,34 @@ const Header: React.FC<HeaderProps> = ({
   const { t } = useLanguage();
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<User[]>([]);
+  const [botName, setBotName] = useState('vimos.ai');
+  const [botAvatar, setBotAvatar] = useState('');
   const dropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const configRef = ref(db, 'appConfig');
+    const unsub = onValue(configRef, (snap) => {
+      if (snap.exists()) {
+        const val = snap.val();
+        if (val) {
+          if (typeof val.aiBotName === 'string' && val.aiBotName.trim()) {
+            setBotName(val.aiBotName.trim());
+          } else {
+            setBotName('vimos.ai');
+          }
+          if (typeof val.aiBotAvatar === 'string') {
+            setBotAvatar(val.aiBotAvatar.trim());
+          } else {
+            setBotAvatar('');
+          }
+          return;
+        }
+      }
+      setBotName('vimos.ai');
+      setBotAvatar('');
+    });
+    return () => unsub();
+  }, []);
 
   useEffect(() => {
     if (query.trim().length > 0) {
@@ -113,6 +144,21 @@ const Header: React.FC<HeaderProps> = ({
         </div>
 
         <div className="flex items-center shrink-0 space-x-1.5">
+          {onAIClick && (
+            <button
+              onClick={onAIClick}
+              className="h-8 px-2.5 flex items-center justify-center space-x-1.5 border border-emerald-500/60 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded-full transition-all active:scale-90 shadow-xs"
+              title={`Chat ${botName}`}
+            >
+              {botAvatar ? (
+                <img src={botAvatar} alt={botName} className="w-4 h-4 rounded-full object-cover ring-1 ring-emerald-400" />
+              ) : (
+                <i className="fas fa-robot text-xs text-emerald-600 animate-pulse"></i>
+              )}
+              <span className="text-[10px] font-black uppercase text-emerald-950 hidden xs:inline sm:inline max-w-[80px] truncate">{botName}</span>
+            </button>
+          )}
+
           <button 
             onClick={onLeaderboardClick}
             className="w-8 h-8 flex items-center justify-center border border-neutral-300 rounded-full hover:bg-black hover:text-white transition-all active:scale-90 text-neutral-800"

@@ -1280,6 +1280,15 @@ export default function App() {
           } catch {}
           setCurrentView(View.SHOP);
         }}
+        onAIClick={() => {
+          setSelectedPostId(null);
+          try {
+            const url = new URL(window.location.href);
+            url.searchParams.delete('post');
+            window.history.pushState({}, '', url.toString());
+          } catch {}
+          setCurrentView(View.CHAT);
+        }}
         userCoins={currentUser.coins ?? 500}
         isAdmin={currentUser.isAdmin}
         onAdminClick={() => {

@@ -4,6 +4,7 @@ import { db } from '../firebase.ts';
 import { ref, onValue, push, serverTimestamp, set, update, remove, get } from 'firebase/database';
 import { ActiveCall } from './CallingOverlay.tsx';
 import { useLanguage } from '../LanguageContext.tsx';
+import HengkurAIChat from './HengkurAIChat.tsx';
 
 interface ChatProps {
   users: User[];
@@ -45,7 +46,35 @@ const Chat: React.FC<ChatProps> = ({
   const [isViewingGroupSettings, setIsViewingGroupSettings] = useState(false);
   const [groupName, setGroupName] = useState('');
   const [selectedForGroup, setSelectedForGroup] = useState<string[]>([]);
-  const [activeTab, setActiveTab] = useState<'direct' | 'shop' | 'groups' | 'anonymous'>('direct');
+  const [activeTab, setActiveTab] = useState<'direct' | 'shop' | 'groups' | 'anonymous' | 'hengkur_ai'>('direct');
+  const [botName, setBotName] = useState<string>('vimos.ai');
+  const [botAvatar, setBotAvatar] = useState<string>('');
+
+  // Sync AI Bot Name and Avatar from Firebase RTDB
+  useEffect(() => {
+    const configRef = ref(db, 'appConfig');
+    const unsub = onValue(configRef, (snapshot) => {
+      if (snapshot.exists()) {
+        const val = snapshot.val();
+        if (val) {
+          if (typeof val.aiBotName === 'string' && val.aiBotName.trim()) {
+            setBotName(val.aiBotName.trim());
+          } else {
+            setBotName('vimos.ai');
+          }
+          if (typeof val.aiBotAvatar === 'string') {
+            setBotAvatar(val.aiBotAvatar.trim());
+          } else {
+            setBotAvatar('');
+          }
+          return;
+        }
+      }
+      setBotName('vimos.ai');
+      setBotAvatar('');
+    });
+    return () => unsub();
+  }, []);
   const [shopSearchQuery, setShopSearchQuery] = useState('');
   const [addMemberSearch, setAddMemberSearch] = useState('');
   const [activeMenuMsgId, setActiveMenuMsgId] = useState<string | null>(null);
@@ -1143,8 +1172,23 @@ const Chat: React.FC<ChatProps> = ({
           </div>
         )}
 
-        {/* 4 Tabs: Direct, Obrolan Toko, Collectives, Anonymous Match */}
+        {/* 5 Tabs: AI Bot, Direct, Obrolan Toko, Collectives, Anonymous Match */}
         <div className="flex border-b-2 border-black/5 mb-6 overflow-x-auto scrollbar-none">
+          <button 
+            onClick={() => setActiveTab('hengkur_ai')}
+            className={`flex-1 min-w-[110px] py-3 text-[10px] font-black uppercase tracking-[0.1em] transition-all border-b-2 flex items-center justify-center space-x-1.5 ${
+              activeTab === 'hengkur_ai' ? 'border-emerald-500 text-emerald-600 font-extrabold' : 'border-transparent text-gray-400 hover:text-gray-700'
+            }`}
+          >
+            {botAvatar ? (
+              <img src={botAvatar} alt={botName} className="w-4 h-4 rounded-full object-cover ring-1 ring-emerald-400" />
+            ) : (
+              <i className="fas fa-robot text-emerald-500 text-xs animate-pulse"></i>
+            )}
+            <span className="truncate max-w-[90px]">{botName}</span>
+            <span className="bg-emerald-100 text-emerald-700 text-[8px] font-black px-1.5 py-0.5 rounded-full">AI</span>
+          </button>
+
           <button 
             onClick={() => setActiveTab('direct')}
             className={`flex-1 min-w-[70px] py-3 text-[10px] font-black uppercase tracking-[0.1em] transition-all border-b-2 ${
@@ -1185,38 +1229,87 @@ const Chat: React.FC<ChatProps> = ({
         </div>
 
         <div className="space-y-4 flex-1 overflow-y-auto pr-1">
+          {activeTab === 'hengkur_ai' && (
+            <div className="h-full min-h-[460px] flex flex-col -mx-2 sm:mx-0">
+              <HengkurAIChat 
+                currentUser={currentUser} 
+                onBotNameChange={(name) => setBotName(name)}
+                onBotAvatarChange={(avatar) => setBotAvatar(avatar)}
+              />
+            </div>
+          )}
+
           {activeTab === 'direct' && (
-            mutualFollowers.length === 0 ? (
-              <div className="text-center py-20 text-gray-400 italic text-sm px-6">
-                Direct whispers are only for mutual orbit members (who follow each other).
-              </div>
-            ) : (
-              mutualFollowers.map(u => (
-                <div key={u.id} className="flex items-center border border-black/5 rounded-2xl hover:border-black transition-all group p-4 bg-white shadow-sm">
-                  <img 
-                    src={u.photoURL} 
-                    className="w-12 h-12 rounded-full mr-4 border border-black/10 bg-gray-100 cursor-pointer object-cover shadow-sm" 
-                    alt={u.name} 
-                    onClick={() => onUserClick(u.id)}
-                  />
-                  <button 
-                    onClick={() => setSelectedRecipient({ type: 'user', data: u })}
-                    className="flex-1 text-left"
-                  >
-                    <p className="font-bold text-sm uppercase">{u.name}</p>
-                    <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Mutual Connection</p>
-                  </button>
-                  <button
-                    onClick={(e) => handleClearDirectUserChat(u.id, e)}
-                    className="p-2 text-gray-300 hover:text-red-600 hover:bg-red-50 rounded-full text-xs transition-colors mr-2"
-                    title="Hapus riwayat obrolan"
-                  >
-                    <i className="fas fa-trash-can"></i>
-                  </button>
-                  <i className="fas fa-chevron-right text-gray-200 group-hover:text-black transition-colors"></i>
+            <div className="space-y-3">
+              {/* Pinned AI Bot Assistant Card */}
+              <div 
+                onClick={() => setActiveTab('hengkur_ai')}
+                className="flex items-center border-2 border-emerald-500/40 bg-gradient-to-r from-emerald-50/80 via-teal-50/40 to-white rounded-2xl hover:border-emerald-500 transition-all p-3.5 shadow-xs cursor-pointer group hover:scale-[1.01]"
+              >
+                <div className="relative mr-3.5 shrink-0">
+                  {botAvatar ? (
+                    <img 
+                      src={botAvatar} 
+                      alt={botName}
+                      className="w-12 h-12 rounded-2xl object-cover shadow-md ring-2 ring-emerald-400/60"
+                    />
+                  ) : (
+                    <div className="w-12 h-12 rounded-2xl bg-black text-white flex items-center justify-center shadow-md ring-2 ring-emerald-400/50">
+                      <i className="fas fa-robot text-lg text-emerald-400"></i>
+                    </div>
+                  )}
+                  <span className="absolute -bottom-1 -right-1 w-3.5 h-3.5 bg-emerald-500 border-2 border-white rounded-full flex items-center justify-center">
+                    <span className="w-1.5 h-1.5 bg-white rounded-full animate-ping"></span>
+                  </span>
                 </div>
-              ))
-            )
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center space-x-1.5">
+                    <p className="font-black text-sm uppercase text-neutral-900 truncate">{botName}</p>
+                    <span className="bg-emerald-600 text-white text-[8px] font-black px-1.5 py-0.5 rounded-md flex items-center space-x-1 shrink-0">
+                      <i className="fas fa-sparkles text-[7px] text-yellow-300"></i>
+                      <span>ASISTEN AI</span>
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-neutral-600 font-bold truncate mt-0.5">Tanya ide caption, musik, konten viral, coding, atau ngobrol...</p>
+                </div>
+                <div className="flex items-center space-x-1 pl-2 shrink-0">
+                  <span className="text-[10px] font-black text-emerald-600 bg-emerald-100 px-2 py-1 rounded-xl hidden sm:inline">Buka AI</span>
+                  <i className="fas fa-chevron-right text-neutral-400 group-hover:text-black group-hover:translate-x-0.5 transition-all text-xs"></i>
+                </div>
+              </div>
+
+              {mutualFollowers.length === 0 ? (
+                <div className="text-center py-16 text-gray-400 italic text-sm px-6">
+                  Direct whispers are only for mutual orbit members (who follow each other).
+                </div>
+              ) : (
+                mutualFollowers.map(u => (
+                  <div key={u.id} className="flex items-center border border-black/5 rounded-2xl hover:border-black transition-all group p-4 bg-white shadow-sm">
+                    <img 
+                      src={u.photoURL} 
+                      className="w-12 h-12 rounded-full mr-4 border border-black/10 bg-gray-100 cursor-pointer object-cover shadow-sm" 
+                      alt={u.name} 
+                      onClick={() => onUserClick(u.id)}
+                    />
+                    <button 
+                      onClick={() => setSelectedRecipient({ type: 'user', data: u })}
+                      className="flex-1 text-left"
+                    >
+                      <p className="font-bold text-sm uppercase">{u.name}</p>
+                      <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Mutual Connection</p>
+                    </button>
+                    <button
+                      onClick={(e) => handleClearDirectUserChat(u.id, e)}
+                      className="p-2 text-gray-300 hover:text-red-600 hover:bg-red-50 rounded-full text-xs transition-colors mr-2"
+                      title="Hapus riwayat obrolan"
+                    >
+                      <i className="fas fa-trash-can"></i>
+                    </button>
+                    <i className="fas fa-chevron-right text-gray-200 group-hover:text-black transition-colors"></i>
+                  </div>
+                ))
+              )}
+            </div>
           )}
 
           {activeTab === 'shop' && (

@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { View, User, Post, Comment, UserNotification, Announcement, Story, LiveStream } from './types.ts';
+import { View, User, Post, Comment, UserNotification, Announcement, Story, LiveStream, GlobalSound } from './types.ts';
 import Header from './components/Header.tsx';
 import Navbar from './components/Navbar.tsx';
 import Feed from './components/Feed.tsx';
@@ -18,10 +18,12 @@ import LiveStreamModal from './components/LiveStreamModal.tsx';
 import { LiveHub } from './components/LiveHub.tsx';
 import { auth, db } from './firebase.ts';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
-import { ref, onValue, set, update, push, remove, query, limitToLast, Unsubscribe as DBUnsubscribe } from 'firebase/database';
+import { ref, onValue, set, update, push, remove, query, limitToLast, get, Unsubscribe as DBUnsubscribe } from 'firebase/database';
 import { useLanguage } from './LanguageContext.tsx';
 import CallingOverlay, { ActiveCall } from './components/CallingOverlay.tsx';
 import { HeadsUpNotification, IncomingMessagePayload, playChatNotificationSound } from './components/HeadsUpNotification.tsx';
+import { initialPosts, initialUsers } from './services/mockData.ts';
+import { INITIAL_GLOBAL_SOUNDS, extractYouTubeId } from './services/youtubeMusic.ts';
 
 // List Admin King
 const ADMIN_EMAILS = ['nwaystore68@gmail.com', 'nwaystore78@gmail.com', 'nocteos609@gmail.com'];
@@ -35,11 +37,7 @@ export default function App() {
       return stored ? JSON.parse(stored) : null;
     } catch { return null; }
   });
-  const [authLoading, setAuthLoading] = useState<boolean>(() => {
-    try {
-      return !localStorage.getItem('vimos_user');
-    } catch { return true; }
-  });
+  const [authLoading, setAuthLoading] = useState<boolean>(false);
   const [loadingPosts, setLoadingPosts] = useState<boolean>(() => {
     try {
       const stored = localStorage.getItem('vimos_posts');
@@ -47,6 +45,7 @@ export default function App() {
       return parsed.length === 0;
     } catch { return true; }
   });
+  const [isSyncingFirebase, setIsSyncingFirebase] = useState<boolean>(false);
   const [users, setUsers] = useState<User[]>(() => {
     try {
       const stored = localStorage.getItem('vimos_users');
@@ -58,6 +57,12 @@ export default function App() {
       const stored = localStorage.getItem('vimos_posts');
       return stored ? JSON.parse(stored) : [];
     } catch { return []; }
+  });
+  const [globalSounds, setGlobalSounds] = useState<GlobalSound[]>(() => {
+    try {
+      const stored = localStorage.getItem('vimos_sounds');
+      return stored ? JSON.parse(stored) : INITIAL_GLOBAL_SOUNDS;
+    } catch { return INITIAL_GLOBAL_SOUNDS; }
   });
   const [stories, setStories] = useState<Story[]>(() => {
     try {
@@ -122,6 +127,31 @@ export default function App() {
   const [isLiveModalOpen, setIsLiveModalOpen] = useState(false);
   const [selectedLiveStreamId, setSelectedLiveStreamId] = useState<string | null>(null);
   const [liveModalMode, setLiveModalMode] = useState<'browse' | 'create' | 'watch'>('browse');
+
+  // Back Button Navigation & Exit Confirmation States
+  const [isExitConfirmOpen, setIsExitConfirmOpen] = useState(false);
+  const [isAppExited, setIsAppExited] = useState(false);
+
+  const currentViewRef = useRef<View>(currentView);
+  useEffect(() => { currentViewRef.current = currentView; }, [currentView]);
+
+  const selectedPostIdRef = useRef<string | null>(selectedPostId);
+  useEffect(() => { selectedPostIdRef.current = selectedPostId; }, [selectedPostId]);
+
+  const selectedProfileIdRef = useRef<string | null>(selectedProfileId);
+  useEffect(() => { selectedProfileIdRef.current = selectedProfileId; }, [selectedProfileId]);
+
+  const isLiveModalOpenRef = useRef<boolean>(isLiveModalOpen);
+  useEffect(() => { isLiveModalOpenRef.current = isLiveModalOpen; }, [isLiveModalOpen]);
+
+  const currentCallRef = useRef<ActiveCall | null>(currentCall);
+  useEffect(() => { currentCallRef.current = currentCall; }, [currentCall]);
+
+  const isExitConfirmOpenRef = useRef<boolean>(isExitConfirmOpen);
+  useEffect(() => { isExitConfirmOpenRef.current = isExitConfirmOpen; }, [isExitConfirmOpen]);
+
+  const currentUserRef = useRef<User | null>(currentUser);
+  useEffect(() => { currentUserRef.current = currentUser; }, [currentUser]);
 
   const userUnsubscribeRef = useRef<DBUnsubscribe | null>(null);
 
@@ -245,36 +275,103 @@ export default function App() {
     usersRef.current = users;
   }, [users]);
 
-  // Listen to popstate / URL changes for shared post deep linking
+  // Smart Back-Button Navigation Controller
   useEffect(() => {
-    const handleUrlChange = () => {
-      try {
-        const params = new URLSearchParams(window.location.search);
-        const postIdParam = params.get('post');
-        if (postIdParam) {
-          setSelectedPostId(postIdParam);
-        } else {
-          setSelectedPostId(null);
+    // Ensure initial state exists in history
+    try {
+      if (!window.history.state || !window.history.state.orbit_app) {
+        window.history.replaceState({ orbit_app: true, layer: 0 }, '');
+        window.history.pushState({ orbit_app: true, layer: 1 }, '');
+      }
+    } catch {}
+
+    const handlePopState = () => {
+      // 1. If Exit Confirmation Modal is already showing, pressing back closes the modal
+      if (isExitConfirmOpenRef.current) {
+        setIsExitConfirmOpen(false);
+        try { window.history.pushState({ orbit_app: true, layer: 1 }, ''); } catch {}
+        return;
+      }
+
+      // 2. If Live Stream Modal is open, close it
+      if (isLiveModalOpenRef.current) {
+        setIsLiveModalOpen(false);
+        try { window.history.pushState({ orbit_app: true, layer: 1 }, ''); } catch {}
+        return;
+      }
+
+      // 3. If Single Post Deep Link / Modal is open, close it back to feed
+      if (selectedPostIdRef.current) {
+        setSelectedPostId(null);
+        try {
+          const url = new URL(window.location.href);
+          url.searchParams.delete('post');
+          window.history.replaceState({ orbit_app: true, layer: 1 }, '', url.toString());
+          window.history.pushState({ orbit_app: true, layer: 1 }, '', url.toString());
+        } catch {
+          try { window.history.pushState({ orbit_app: true, layer: 1 }, ''); } catch {}
         }
-      } catch {}
+        return;
+      }
+
+      // 4. If viewing someone else's profile, return to Home (Feed)
+      if (selectedProfileIdRef.current && currentUserRef.current && selectedProfileIdRef.current !== currentUserRef.current.id) {
+        setSelectedProfileId(null);
+        setCurrentView(View.FEED);
+        try { window.history.pushState({ orbit_app: true, layer: 1 }, ''); } catch {}
+        return;
+      }
+
+      // 5. If on any tab other than Home (Feed) (e.g. Reels, Shop, Chat, Notifications, Profile, Admin, Leaderboard, Post)
+      if (currentViewRef.current !== View.FEED) {
+        setCurrentView(View.FEED);
+        setSelectedProfileId(null);
+        setTargetChatUserId(null);
+        setTargetChatGroupId(null);
+        setSearchTerm('');
+        try { window.history.pushState({ orbit_app: true, layer: 1 }, ''); } catch {}
+        return;
+      }
+
+      // 6. If ALREADY on Home (Feed) with no subviews/modals -> Prompt confirmation to exit
+      setIsExitConfirmOpen(true);
+      try { window.history.pushState({ orbit_app: true, layer: 1 }, ''); } catch {}
     };
 
-    window.addEventListener('popstate', handleUrlChange);
+    window.addEventListener('popstate', handlePopState);
     return () => {
-      window.removeEventListener('popstate', handleUrlChange);
+      window.removeEventListener('popstate', handlePopState);
     };
   }, []);
 
   useEffect(() => {
-    const postsQuery = query(ref(db, 'posts'), limitToLast(80));
-    const storiesQuery = query(ref(db, 'stories'), limitToLast(40));
-    const usersQuery = query(ref(db, 'users'), limitToLast(120));
-    const annQuery = query(ref(db, 'announcements'), limitToLast(15));
-    const streamsQuery = query(ref(db, 'livestreams'), limitToLast(30));
+    const postsQuery = query(ref(db, 'posts'), limitToLast(30));
+    const storiesQuery = query(ref(db, 'stories'), limitToLast(20));
+    const usersQuery = query(ref(db, 'users'), limitToLast(40));
+    const annQuery = query(ref(db, 'announcements'), limitToLast(8));
+    const streamsQuery = query(ref(db, 'livestreams'), limitToLast(15));
+
+    // Fast direct fetch for immediate first paint without waiting for full stream handshake
+    get(postsQuery).then((snapshot) => {
+      const data = snapshot.val();
+      if (data && Object.keys(data).length > 0) {
+        const postList = Object.entries(data).map(([id, val]: [string, any]) => ({
+          id,
+          ...val,
+          likes: val.likes ? Object.keys(val.likes) : [],
+          dislikes: val.dislikes ? Object.keys(val.dislikes) : [],
+          comments: val.comments ? Object.entries(val.comments).map(([cid, cval]: [string, any]) => ({ id: cid, ...cval })) : []
+        }));
+        const sorted = postList.sort((a, b) => b.timestamp - a.timestamp);
+        setPosts(sorted);
+        try { localStorage.setItem('vimos_posts', JSON.stringify(sorted.slice(0, 20))); } catch {}
+        setLoadingPosts(false);
+      }
+    }).catch(() => {});
 
     const postLoadingTimer = setTimeout(() => {
       setLoadingPosts(false);
-    }, 30);
+    }, 2200);
 
     const unsubscribeStreams = onValue(streamsQuery, (snapshot) => {
       const data = snapshot.val();
@@ -292,7 +389,7 @@ export default function App() {
 
     const unsubscribePosts = onValue(postsQuery, (snapshot) => {
       const data = snapshot.val();
-      if (data) {
+      if (data && Object.keys(data).length > 0) {
         const postList = Object.entries(data).map(([id, val]: [string, any]) => ({
           id,
           ...val,
@@ -302,12 +399,28 @@ export default function App() {
         }));
         const sorted = postList.sort((a, b) => b.timestamp - a.timestamp);
         setPosts(sorted);
-        try { localStorage.setItem('vimos_posts', JSON.stringify(sorted.slice(0, 30))); } catch {}
+        try { localStorage.setItem('vimos_posts', JSON.stringify(sorted.slice(0, 20))); } catch {}
       } else {
-        setPosts([]);
+        // Seed default posts if RTDB node is empty so users have initial content
+        initialPosts.forEach(p => {
+          set(ref(db, `posts/${p.id}`), {
+            userId: p.userId,
+            userName: p.userName,
+            userPhoto: p.userPhoto,
+            text: p.text,
+            photoURL: p.photoURL || '',
+            timestamp: p.timestamp,
+            likes: { [p.userId]: true },
+            dislikes: {}
+          }).catch(() => {});
+        });
+        setPosts(initialPosts);
       }
       setLoadingPosts(false);
-    }, (err) => console.warn('Posts listener error:', err));
+    }, (err) => {
+      console.warn('Posts listener error:', err);
+      setLoadingPosts(false);
+    });
 
     const unsubscribeStories = onValue(storiesQuery, (snapshot) => {
       const data = snapshot.val();
@@ -317,10 +430,16 @@ export default function App() {
         const validStories: Story[] = [];
         
         Object.entries(data).forEach(([id, val]: [string, any]) => {
-          if (now - val.createdAt < twentyFourHours) {
-            validStories.push({ id, ...val });
+          const created = val.createdAt || (val.timestamp || now);
+          if (now - created < twentyFourHours) {
+            validStories.push({ 
+              id, 
+              ...val, 
+              createdAt: created, 
+              expiresAt: val.expiresAt || (created + twentyFourHours) 
+            });
           } else {
-            remove(ref(db, `stories/${id}`));
+            remove(ref(db, `stories/${id}`)).catch(() => {});
           }
         });
         const sorted = validStories.sort((a, b) => b.createdAt - a.createdAt);
@@ -344,7 +463,7 @@ export default function App() {
         }));
         setUsers(userList);
         usersRef.current = userList;
-        try { localStorage.setItem('vimos_users', JSON.stringify(userList.slice(0, 50))); } catch {}
+        try { localStorage.setItem('vimos_users', JSON.stringify(userList.slice(0, 30))); } catch {}
       }
     }, (err) => console.warn('Users listener error:', err));
 
@@ -363,6 +482,40 @@ export default function App() {
       }
     }, (err) => console.warn('Announcements listener error:', err));
 
+    const soundsQuery = query(ref(db, 'sounds'), limitToLast(60));
+    const unsubscribeSounds = onValue(soundsQuery, (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const soundList: GlobalSound[] = Object.entries(data).map(([id, val]: [string, any]) => ({
+          id,
+          ...val
+        }));
+        // Sort sounds by use count and added date
+        const sortedSounds = soundList.sort((a, b) => (b.useCount || 0) - (a.useCount || 0));
+        setGlobalSounds(sortedSounds);
+        try { localStorage.setItem('vimos_sounds', JSON.stringify(sortedSounds)); } catch {}
+      } else {
+        // Initialize Firebase sounds collection with initial sounds
+        INITIAL_GLOBAL_SOUNDS.forEach((snd) => {
+          set(ref(db, `sounds/${snd.id}`), {
+            id: snd.id,
+            title: snd.title,
+            author: snd.author,
+            url: snd.url,
+            thumbnailUrl: snd.thumbnailUrl,
+            duration: snd.duration,
+            sourceType: snd.sourceType,
+            youtubeId: (snd as any).youtubeId || null,
+            startTime: snd.startTime || 0,
+            endTime: snd.endTime || (snd.startTime ? snd.startTime + 30 : 30),
+            useCount: snd.useCount || 1,
+            addedByUserName: snd.addedByUserName || 'Vimos Sound Lab',
+            createdAt: snd.createdAt || Date.now()
+          });
+        });
+      }
+    }, (err) => console.warn('Sounds listener error:', err));
+
     return () => {
       clearTimeout(postLoadingTimer);
       unsubscribeStreams();
@@ -370,8 +523,36 @@ export default function App() {
       unsubscribeStories();
       unsubscribeUsers();
       unsubscribeAnn();
+      unsubscribeSounds();
     };
   }, []);
+
+  const refreshFirebasePosts = async () => {
+    setIsSyncingFirebase(true);
+    try {
+      const snapshot = await get(query(ref(db, 'posts'), limitToLast(30)));
+      const data = snapshot.val();
+      if (data && Object.keys(data).length > 0) {
+        const postList = Object.entries(data).map(([id, val]: [string, any]) => ({
+          id,
+          ...val,
+          likes: val.likes ? Object.keys(val.likes) : [],
+          dislikes: val.dislikes ? Object.keys(val.dislikes) : [],
+          comments: val.comments ? Object.entries(val.comments).map(([cid, cval]: [string, any]) => ({ id: cid, ...cval })) : []
+        }));
+        const sorted = postList.sort((a, b) => b.timestamp - a.timestamp);
+        setPosts(sorted);
+        try { localStorage.setItem('vimos_posts', JSON.stringify(sorted.slice(0, 20))); } catch {}
+      } else {
+        setPosts(initialPosts);
+      }
+    } catch (err) {
+      console.warn('Manual Firebase fetch error:', err);
+    } finally {
+      setIsSyncingFirebase(false);
+      setLoadingPosts(false);
+    }
+  };
 
   useEffect(() => {
     const callsQuery = query(ref(db, 'calls'), limitToLast(20));
@@ -448,9 +629,9 @@ export default function App() {
   useEffect(() => {
     if (!currentUser) return;
 
-    // 1. Listen to Direct Chats & Shop Chats
-    const chatsRef = ref(db, 'chats');
-    const unsubscribeChats = onValue(chatsRef, (snapshot) => {
+    // 1. Listen to Direct Chats & Shop Chats (limited to recent active chats)
+    const chatsQuery = query(ref(db, 'chats'), limitToLast(20));
+    const unsubscribeChats = onValue(chatsQuery, (snapshot) => {
       const data = snapshot.val();
       if (!data) return;
 
@@ -489,9 +670,9 @@ export default function App() {
       });
     });
 
-    // 2. Listen to Collectives / Groups
-    const groupsRef = ref(db, 'groups');
-    const unsubscribeGroups = onValue(groupsRef, (snapshot) => {
+    // 2. Listen to Collectives / Groups (limited to recent active groups)
+    const groupsQuery = query(ref(db, 'groups'), limitToLast(20));
+    const unsubscribeGroups = onValue(groupsQuery, (snapshot) => {
       const data = snapshot.val();
       if (!data) return;
 
@@ -746,16 +927,27 @@ export default function App() {
     }
   };
 
-  const addStory = (text: string, photoURL: string) => {
+  const addStory = (text: string, photoURL?: string, videoURL?: string, mediaType?: 'image' | 'video') => {
     if (!currentUser) return;
+    const now = Date.now();
+    const resolvedType = mediaType || (videoURL ? 'video' : photoURL ? 'image' : undefined);
     push(ref(db, 'stories'), {
       userId: currentUser.id,
       userName: currentUser.name || 'Anonymous Orbit',
       userPhoto: currentUser.photoURL || '',
-      createdAt: Date.now(),
-      text,
-      photoURL: photoURL || null
+      createdAt: now,
+      expiresAt: now + 24 * 60 * 60 * 1000,
+      text: text.trim(),
+      photoURL: photoURL || null,
+      videoURL: videoURL || null,
+      mediaType: resolvedType || null
     });
+  };
+
+  const deleteStory = (storyId: string) => {
+    if (!currentUser) return;
+    remove(ref(db, `stories/${storyId}`)).catch(() => {});
+    setStories(prev => prev.filter(s => s.id !== storyId));
   };
 
   const startCall = (type: 'private' | 'collective', mediaType: 'audio' | 'video', targetId: string, name?: string) => {
@@ -819,7 +1011,17 @@ export default function App() {
     set(ref(db, `calls/${callId}/activeParticipants/${currentUser.id}`), true);
   };
 
-  const createPost = (data: { text: string; photoURL?: string; videoURL?: string; musicURL?: string }) => {
+  const createPost = (data: { 
+    text: string; 
+    photoURL?: string; 
+    videoURL?: string; 
+    musicURL?: string;
+    musicTitle?: string;
+    musicAuthor?: string;
+    musicThumbnail?: string;
+    musicStart?: number;
+    musicEnd?: number;
+  }) => {
     if (!currentUser) return;
     const tempPostId = `temp_${Date.now()}`;
     const newPost: Post = {
@@ -832,6 +1034,11 @@ export default function App() {
       photoURL: data.photoURL || undefined,
       videoURL: data.videoURL || undefined,
       musicURL: data.musicURL || undefined,
+      musicTitle: data.musicTitle || undefined,
+      musicAuthor: data.musicAuthor || undefined,
+      musicThumbnail: data.musicThumbnail || undefined,
+      musicStart: data.musicStart !== undefined ? data.musicStart : undefined,
+      musicEnd: data.musicEnd !== undefined ? data.musicEnd : undefined,
       likes: [],
       dislikes: [],
       comments: []
@@ -849,10 +1056,57 @@ export default function App() {
       photoURL: data.photoURL || null,
       videoURL: data.videoURL || null,
       musicURL: data.musicURL || null,
+      musicTitle: data.musicTitle || null,
+      musicAuthor: data.musicAuthor || null,
+      musicThumbnail: data.musicThumbnail || null,
+      musicStart: data.musicStart !== undefined ? data.musicStart : null,
+      musicEnd: data.musicEnd !== undefined ? data.musicEnd : null,
       likes: {},
       dislikes: {},
       comments: {}
     });
+
+    // Automatically add or increment sound in Global Sound Library so others can search & reuse it
+    if (data.musicURL) {
+      const ytId = extractYouTubeId(data.musicURL);
+      const soundKey = ytId ? `yt_${ytId}` : `snd_${Date.now()}`;
+      const soundTitle = data.musicTitle || (ytId ? 'YouTube Sound Track' : 'Vimos Sound Track');
+      const soundAuthor = data.musicAuthor || currentUser.name || 'Vimos Creator';
+      const soundThumb = data.musicThumbnail || (ytId ? `https://img.youtube.com/vi/${ytId}/hqdefault.jpg` : '');
+      const startTime = data.musicStart || 0;
+      const endTime = data.musicEnd || (startTime + 30);
+
+      const soundRef = ref(db, `sounds/${soundKey}`);
+      get(soundRef).then(snap => {
+        if (snap.exists()) {
+          const prevData = snap.val();
+          update(soundRef, {
+            useCount: (prevData.useCount || 1) + 1,
+            lastUsedAt: Date.now()
+          });
+        } else {
+          set(soundRef, {
+            id: soundKey,
+            title: soundTitle,
+            author: soundAuthor,
+            url: data.musicURL,
+            thumbnailUrl: soundThumb,
+            duration: endTime - startTime,
+            sourceType: ytId ? 'youtube' : 'upload',
+            youtubeId: ytId || null,
+            startTime: startTime,
+            endTime: endTime,
+            useCount: 1,
+            addedBy: currentUser.id,
+            addedByName: currentUser.name || 'Anonymous',
+            addedAt: Date.now()
+          });
+        }
+      }).catch(err => {
+        console.warn('Error syncing sound to global library:', err);
+      });
+    }
+
     setCurrentView(View.FEED);
   };
 
@@ -898,24 +1152,98 @@ export default function App() {
       );
   }, [posts, searchTerm, currentUser]);
 
+  // Filter stories: 24h expiration & only visible to followers/following (or author/admin)
+  const visibleStories = useMemo(() => {
+    if (!currentUser) return [];
+    const now = Date.now();
+    const twentyFourHours = 24 * 60 * 60 * 1000;
+    
+    return stories.filter(story => {
+      // 1. Enforce strict 24-hour expiration
+      const createdAt = story.createdAt || (story.expiresAt ? story.expiresAt - twentyFourHours : now);
+      if (now - createdAt >= twentyFourHours) {
+        return false;
+      }
+
+      // 2. Author always sees their own story
+      if (story.userId === currentUser.id) {
+        return true;
+      }
+
+      // 3. Admin can view for moderation and support
+      if (currentUser.isAdmin) {
+        return true;
+      }
+
+      // 4. Followers & Following visibility:
+      // Visible if current user follows story creator OR story creator follows current user
+      const creator = users.find(u => u.id === story.userId);
+      const myFollowing = currentUser.following || [];
+      const myFollowers = currentUser.followers || [];
+      const creatorFollowing = creator?.following || [];
+      const creatorFollowers = creator?.followers || [];
+
+      const isFollowingCreator = myFollowing.includes(story.userId) || creatorFollowers.includes(currentUser.id);
+      const isFollowedByCreator = myFollowers.includes(story.userId) || creatorFollowing.includes(currentUser.id);
+
+      return isFollowingCreator || isFollowedByCreator;
+    });
+  }, [stories, currentUser, users]);
+
+  // Periodic cleanup interval for stories older than 24 hours
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      const twentyFourHours = 24 * 60 * 60 * 1000;
+      stories.forEach(story => {
+        const createdAt = story.createdAt || now;
+        if (now - createdAt >= twentyFourHours) {
+          remove(ref(db, `stories/${story.id}`)).catch(() => {});
+        }
+      });
+    }, 60000);
+    return () => clearInterval(interval);
+  }, [stories]);
+
   const profileToDisplay = useMemo(() => {
     if (selectedProfileId) return users.find(u => u.id === selectedProfileId) || null;
     return currentUser;
   }, [selectedProfileId, users, currentUser]);
 
-  if (authLoading && !currentUser) return (
-    <div className="flex flex-col items-center justify-center min-h-screen bg-white animate-fade-in">
-      <div className="relative">
-        <div className="absolute -inset-4 rounded-full bg-black/5 animate-ping" style={{ animationDuration: '2s' }}></div>
-        <div className="w-16 h-16 rounded-3xl bg-black flex items-center justify-center relative z-10 shadow-lg">
-          <i className="fas fa-circle-notch text-white text-2xl animate-spin"></i>
+  const handleConfirmExit = () => {
+    setIsExitConfirmOpen(false);
+    setIsAppExited(true);
+    try {
+      window.close();
+    } catch {}
+  };
+
+  if (isAppExited) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-screen bg-neutral-950 text-white p-6 text-center animate-fade-in">
+        <div className="w-16 h-16 rounded-full bg-neutral-900 border border-neutral-800 flex items-center justify-center mb-4 text-white shadow-lg">
+          <i className="fas fa-arrow-right-from-bracket text-2xl"></i>
         </div>
+        <h2 className="text-xl font-black tracking-tight mb-1.5">Sesi Orbit Ditutup</h2>
+        <p className="text-xs text-neutral-400 max-w-xs mb-6 leading-relaxed">
+          Kamu telah keluar dari aplikasi Orbit. Silakan tutup tab browser kamu atau tekan tombol di bawah untuk kembali.
+        </p>
+        <button
+          onClick={() => {
+            setIsAppExited(false);
+            setCurrentView(View.FEED);
+            try {
+              window.history.pushState({ orbit_app: true, layer: 1 }, '');
+            } catch {}
+          }}
+          className="bg-white text-black text-xs font-bold px-6 py-3 rounded-full hover:bg-neutral-200 transition-all shadow-md active:scale-95 flex items-center space-x-2"
+        >
+          <i className="fas fa-rotate-left text-xs"></i>
+          <span>Buka Kembali Orbit</span>
+        </button>
       </div>
-      <p className="mt-6 text-[10px] font-black uppercase tracking-[0.4em] text-gray-400 animate-pulse">
-        CONNECTING...
-      </p>
-    </div>
-  );
+    );
+  }
 
   if (!currentUser) return <AuthScreen bannedMessage={bannedMessage} />;
 
@@ -1005,8 +1333,9 @@ export default function App() {
         ) : currentView === View.FEED ? (
           <Feed 
             posts={filteredPosts} 
-            stories={stories}
+            stories={visibleStories}
             onAddStory={addStory}
+            onDeleteStory={deleteStory}
             announcements={announcements}
             onLike={toggleLike} 
             onDislike={toggleDislike}
@@ -1021,6 +1350,8 @@ export default function App() {
             onDeletePost={deletePost}
             users={users}
             isLoading={loadingPosts}
+            isSyncing={isSyncingFirebase}
+            onRefresh={refreshFirebasePosts}
             activeStreams={activeStreams}
             onGoLiveClick={() => {
               setLiveModalMode('create');
@@ -1032,6 +1363,7 @@ export default function App() {
               setLiveModalMode('watch');
               setIsLiveModalOpen(true);
             }}
+            onCreatePostClick={() => setCurrentView(View.POST)}
           />
         ) : null}
         {currentView === View.REELS && (
@@ -1049,7 +1381,7 @@ export default function App() {
             users={users}
           />
         )}
-        {currentView === View.POST && <PostCreator onPost={createPost} />}
+        {currentView === View.POST && <PostCreator onPost={createPost} globalSounds={globalSounds} />}
         {currentView === View.LEADERBOARD && (
           <Leaderboard 
             users={users} 
@@ -1238,6 +1570,38 @@ export default function App() {
         permissionStatus={notifPermission}
         onRequestPermission={requestNotifPermission}
       />
+
+      {/* EXIT CONFIRMATION DIALOG (YAKIN KELUAR?) */}
+      {isExitConfirmOpen && (
+        <div className="fixed inset-0 z-[120] bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 animate-fade-in">
+          <div className="bg-white rounded-3xl p-6 max-w-xs w-full shadow-2xl border border-neutral-100 text-center animate-scale-up">
+            <div className="w-14 h-14 rounded-full bg-neutral-100 border border-neutral-200/80 flex items-center justify-center mx-auto mb-3.5 text-neutral-900 shadow-2xs">
+              <i className="fas fa-arrow-right-from-bracket text-xl"></i>
+            </div>
+            <h3 className="text-base font-black text-neutral-900 tracking-tight">Yakin keluar?</h3>
+            <p className="text-xs text-neutral-500 mt-1 mb-6 leading-relaxed">
+              Apakah kamu yakin ingin meninggalkan dan keluar dari aplikasi Orbit?
+            </p>
+            <div className="flex space-x-2.5">
+              <button
+                type="button"
+                onClick={() => setIsExitConfirmOpen(false)}
+                className="flex-1 py-2.5 px-4 rounded-2xl bg-neutral-100 hover:bg-neutral-200 text-neutral-800 text-xs font-bold transition-all active:scale-95 border border-neutral-200/60"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmExit}
+                className="flex-1 py-2.5 px-4 rounded-2xl bg-black hover:bg-neutral-800 text-white text-xs font-bold transition-all active:scale-95 shadow-xs flex items-center justify-center space-x-1.5"
+              >
+                <i className="fas fa-check text-[11px]"></i>
+                <span>Keluar</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

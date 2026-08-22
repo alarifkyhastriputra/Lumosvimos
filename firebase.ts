@@ -1,6 +1,6 @@
 
-import { initializeApp } from 'firebase/app';
-import { getAuth } from 'firebase/auth';
+import { initializeApp, getApps, getApp } from 'firebase/app';
+import { initializeAuth, browserLocalPersistence, indexedDBLocalPersistence, browserSessionPersistence, getAuth } from 'firebase/auth';
 import { getDatabase } from 'firebase/database';
 
 const firebaseConfig = {
@@ -13,6 +13,17 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:163313653543:web:8bf5627ebe6a92ff11bb02"
 };
 
-const app = initializeApp(firebaseConfig);
-export const auth = getAuth(app);
+const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+
+let authInstance;
+try {
+  authInstance = initializeAuth(app, {
+    persistence: [indexedDBLocalPersistence, browserLocalPersistence, browserSessionPersistence]
+  });
+} catch {
+  authInstance = getAuth(app);
+}
+
+export const auth = authInstance;
 export const db = getDatabase(app);
+

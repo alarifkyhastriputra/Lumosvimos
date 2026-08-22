@@ -1,6 +1,12 @@
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Post, User, Comment } from '../types';
+import { 
+  getYouTubeIdFromMusicURL, 
+  fetchYouTubeMetadata, 
+  parseYouTubeMusicUrl, 
+  formatSecondsToTime 
+} from '../services/youtubeMusic.ts';
 
 interface PostCardProps {
   post: Post;
@@ -24,7 +30,148 @@ const PostCard: React.FC<PostCardProps> = ({
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [isZoomed, setIsZoomed] = useState(false);
   const [isPlayingMusic, setIsPlayingMusic] = useState(false);
+  const [isMediaLoading, setIsMediaLoading] = useState(true);
+  const [ytMeta, setYtMeta] = useState<{ title: string; author: string; thumbnailUrl: string } | null>(null);
   const commentInputRef = useRef<HTMLInputElement>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const ytIframeRef = useRef<HTMLIFrameElement>(null);
+  const containerRef = useRef<HTMLElement>(null);
+  const hasUserManuallyToggled = useRef<boolean>(false);
+  const isVisibleRef = useRef<boolean>(false);
+  
+  const youtubeId = getYouTubeIdFromMusicURL(post.musicURL);
+  const isYouTubeAudio = !!youtubeId;
+  const parsedYt = post.musicURL ? parseYouTubeMusicUrl(post.musicURL) : null;
+  const effectiveStart = post.musicStart ?? parsedYt?.start ?? 0;
+  const effectiveEnd = post.musicEnd ?? parsedYt?.end ?? (effectiveStart > 0 ? effectiveStart + 30 : 30);
+
+  // Play music with zero latency
+  const playAudio = () => {
+    setIsPlayingMusic(true);
+    if (!isYouTubeAudio && audioRef.current) {
+      if (audioRef.current.currentTime < effectiveStart || audioRef.current.currentTime >= effectiveEnd) {
+        audioRef.current.currentTime = effectiveStart;
+      }
+      audioRef.current.muted = false;
+      const playPromise = audioRef.current.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(() => {
+          // Autoplay policy fallback: unlock and start immediately upon screen interaction
+          const unlock = () => {
+            if (audioRef.current && isVisibleRef.current && !hasUserManuallyToggled.current) {
+              audioRef.current.play().catch(() => {});
+            }
+            window.removeEventListener('pointerdown', unlock);
+            window.removeEventListener('touchstart', unlock);
+            window.removeEventListener('scroll', unlock);
+          };
+          window.addEventListener('pointerdown', unlock, { once: true });
+          window.addEventListener('touchstart', unlock, { once: true });
+          window.addEventListener('scroll', unlock, { once: true });
+        });
+      }
+    } else if (isYouTubeAudio && ytIframeRef.current?.contentWindow) {
+      try {
+        ytIframeRef.current.contentWindow.postMessage(
+          JSON.stringify({ event: 'command', func: 'seekTo', args: [effectiveStart, true] }),
+          '*'
+        );
+        ytIframeRef.current.contentWindow.postMessage(
+          JSON.stringify({ event: 'command', func: 'playVideo', args: [] }),
+          '*'
+        );
+      } catch {}
+    }
+  };
+
+  // Pause music
+  const pauseAudio = () => {
+    setIsPlayingMusic(false);
+    if (!isYouTubeAudio && audioRef.current) {
+      audioRef.current.pause();
+    } else if (isYouTubeAudio && ytIframeRef.current?.contentWindow) {
+      try {
+        ytIframeRef.current.contentWindow.postMessage(
+          JSON.stringify({ event: 'command', func: 'pauseVideo', args: [] }),
+          '*'
+        );
+      } catch {}
+    }
+  };
+
+  // Toggle user manual control
+  const toggleMusic = () => {
+    if (isPlayingMusic) {
+      hasUserManuallyToggled.current = true;
+      pauseAudio();
+    } else {
+      hasUserManuallyToggled.current = false;
+      playAudio();
+    }
+  };
+
+  // Autoplay music when post enters viewport (and pause when scrolled past)
+  useEffect(() => {
+    if (!post.musicURL) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting && entry.intersectionRatio >= 0.35) {
+            isVisibleRef.current = true;
+            if (!hasUserManuallyToggled.current) {
+              playAudio();
+            }
+          } else if (!entry.isIntersecting || entry.intersectionRatio < 0.15) {
+            isVisibleRef.current = false;
+            pauseAudio();
+          }
+        });
+      },
+      {
+        threshold: [0, 0.15, 0.35, 0.6, 0.9],
+        rootMargin: '0px 0px -5% 0px'
+      }
+    );
+
+    if (containerRef.current) {
+      observer.observe(containerRef.current);
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        pauseAudio();
+      } else if (isVisibleRef.current && !hasUserManuallyToggled.current) {
+        playAudio();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      observer.disconnect();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      pauseAudio();
+    };
+  }, [post.musicURL, isYouTubeAudio, effectiveStart, effectiveEnd]);
+
+  // Audio loop handling between trimmed start & end with zero gap
+  const handleAudioTimeUpdate = () => {
+    if (audioRef.current) {
+      if (audioRef.current.currentTime >= effectiveEnd) {
+        audioRef.current.currentTime = effectiveStart;
+      }
+    }
+  };
+
+  // Fetch YouTube metadata if post contains a YouTube audio track
+  useEffect(() => {
+    if (youtubeId) {
+      fetchYouTubeMetadata(youtubeId).then(meta => {
+        setYtMeta(meta);
+      });
+    }
+  }, [youtubeId]);
   
   const postUser = users.find(u => u.id === post.userId);
   const isFollowing = (currentUser.following || []).includes(post.userId);
@@ -151,7 +298,9 @@ const PostCard: React.FC<PostCardProps> = ({
   };
 
   return (
-    <article className={`border rounded-2xl overflow-hidden transition-all shadow-sm ${
+    <article 
+      ref={containerRef}
+      className={`border rounded-2xl overflow-hidden transition-all shadow-sm ${
       post.isTakenDown 
         ? 'opacity-70 grayscale border-red-500/30 bg-red-50/20' 
         : 'bg-white border-black/10 hover:border-black/30'
@@ -171,14 +320,35 @@ const PostCard: React.FC<PostCardProps> = ({
         </div>
       )}
 
-      {post.musicURL && (
+      {/* Zero Delay Audio Element for Regular Audio Files */}
+      {post.musicURL && !isYouTubeAudio && (
         <audio 
+          ref={audioRef}
           src={post.musicURL} 
-          loop 
-          autoPlay={isPlayingMusic} 
-          muted={!isPlayingMusic}
+          preload="auto"
+          onTimeUpdate={handleAudioTimeUpdate}
+          onLoadedMetadata={() => {
+            if (audioRef.current && effectiveStart > 0) {
+              audioRef.current.currentTime = effectiveStart;
+            }
+          }}
           className="hidden"
         />
+      )}
+
+      {/* Hidden YouTube Audio IFrame player loaded eager with enablejsapi for zero lag */}
+      {post.musicURL && isYouTubeAudio && youtubeId && (
+        <div className="sr-only pointer-events-none opacity-0 w-0 h-0 overflow-hidden" aria-hidden="true">
+          <iframe
+            ref={ytIframeRef}
+            key={`postcard_yt_${post.id}_${effectiveStart}_${effectiveEnd}`}
+            src={`https://www.youtube-nocookie.com/embed/${youtubeId}?enablejsapi=1&autoplay=${isPlayingMusic ? '1' : '0'}&start=${effectiveStart}&end=${effectiveEnd}&loop=1&playlist=${youtubeId}&controls=0&playsinline=1&modestbranding=1&rel=0`}
+            title="YouTube Audio Stream"
+            loading="eager"
+            allow="autoplay; encrypted-media"
+            className="w-1 h-1"
+          />
+        </div>
       )}
 
       <div className="p-4 flex items-center space-x-3">
@@ -239,15 +409,17 @@ const PostCard: React.FC<PostCardProps> = ({
         
         {post.musicURL && (
           <button 
-            onClick={() => setIsPlayingMusic(!isPlayingMusic)}
+            onClick={toggleMusic}
             className={`w-8 h-8 flex items-center justify-center rounded-full transition-all border shrink-0 ${
               isPlayingMusic 
-                ? 'text-white border-black bg-black animate-pulse' 
+                ? isYouTubeAudio 
+                  ? 'text-white border-red-600 bg-red-600 animate-pulse shadow-xs' 
+                  : 'text-white border-black bg-black animate-pulse shadow-xs' 
                 : 'text-black border-black/10 bg-gray-50 hover:bg-gray-100'
             }`}
-            title={isPlayingMusic ? "Mute Music" : "Play Music"}
+            title={isPlayingMusic ? "Hentikan Musik (Mute)" : isYouTubeAudio ? "Putar YouTube Audio" : "Putar Musik"}
           >
-            <i className={`fas ${isPlayingMusic ? 'fa-music' : 'fa-volume-mute'} text-[10px]`}></i>
+            <i className={`fas ${isPlayingMusic ? 'fa-volume-high' : 'fa-volume-xmark'} text-[11px]`}></i>
           </button>
         )}
 
@@ -280,16 +452,75 @@ const PostCard: React.FC<PostCardProps> = ({
         <p className={`text-sm leading-relaxed whitespace-pre-wrap ${post.isTakenDown ? 'text-gray-500 italic' : 'text-gray-800'}`}>
           {post.text}
         </p>
+
+        {/* Attached Audio/Music Banner */}
+        {post.musicURL && (
+          <div className="mt-3 flex items-center justify-between p-2.5 rounded-2xl bg-neutral-900 text-white border border-neutral-800 shadow-sm">
+            <div className="flex items-center space-x-2.5 min-w-0">
+              <div className={`w-9 h-9 rounded-xl flex items-center justify-center text-white shrink-0 shadow-xs ${
+                isYouTubeAudio ? 'bg-red-600' : 'bg-neutral-800'
+              }`}>
+                <i className={`fas ${isPlayingMusic ? 'fa-music animate-bounce-subtle' : isYouTubeAudio ? 'fab fa-youtube' : 'fa-music'} text-sm`}></i>
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center space-x-1.5 mb-0.5">
+                  <span className={`text-[8px] font-black px-1.5 py-0.2 rounded uppercase tracking-tighter ${
+                    isYouTubeAudio ? 'bg-red-600 text-white' : 'bg-neutral-800 text-neutral-300'
+                  }`}>
+                    {isYouTubeAudio ? 'YouTube Sound' : 'Vimos Sound'}
+                  </span>
+                  <span className="text-[10px] text-amber-400 font-bold">
+                    {formatSecondsToTime(effectiveStart)} - {formatSecondsToTime(effectiveEnd)} ({effectiveEnd - effectiveStart}s)
+                  </span>
+                </div>
+                <p className="text-xs font-bold text-white truncate">
+                  {post.musicTitle || (isYouTubeAudio ? (ytMeta?.title || 'YouTube Audio Track') : 'Audio Soundtrack')}
+                </p>
+                <p className="text-[10px] text-neutral-400 truncate flex items-center space-x-1.5">
+                  <span>{post.musicAuthor || (isYouTubeAudio ? (ytMeta?.author || 'YouTube') : 'Vimos Artist')}</span>
+                  {isPlayingMusic && (
+                    <span className="text-emerald-400 font-bold flex items-center space-x-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span>
+                      <span>Sedang Memutar Otomatis</span>
+                    </span>
+                  )}
+                </p>
+              </div>
+            </div>
+
+            <button
+              onClick={toggleMusic}
+              className={`px-3 py-1.5 rounded-xl text-xs font-black transition-all flex items-center space-x-1.5 shrink-0 ml-2 shadow-xs ${
+                isPlayingMusic 
+                  ? 'bg-neutral-800 text-white hover:bg-neutral-700' 
+                  : isYouTubeAudio 
+                    ? 'bg-red-600 hover:bg-red-700 text-white' 
+                    : 'bg-white text-black hover:bg-neutral-200'
+              }`}
+            >
+              <i className={`fas ${isPlayingMusic ? 'fa-pause' : 'fa-play'} text-[10px]`}></i>
+              <span>{isPlayingMusic ? 'Jeda' : 'Putar'}</span>
+            </button>
+          </div>
+        )}
       </div>
 
       {(post.photoURL || post.videoURL) && (
-        <div className={`relative bg-black border-y border-black/5 overflow-hidden flex items-center justify-center min-h-[200px] ${post.isTakenDown ? 'opacity-30' : ''}`}>
+        <div className={`relative bg-neutral-900 border-y border-black/5 overflow-hidden flex items-center justify-center min-h-[200px] ${post.isTakenDown ? 'opacity-30' : ''}`}>
+          {isMediaLoading && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center bg-neutral-950/70 z-10 space-y-2">
+              <div className="w-8 h-8 rounded-full border-2 border-neutral-600 border-t-white animate-spin"></div>
+              <span className="text-[10px] font-semibold text-neutral-300">Memuat media...</span>
+            </div>
+          )}
           {post.photoURL && (
             <img 
               src={post.photoURL} 
               alt="Content" 
               loading="lazy"
               decoding="async"
+              onLoad={() => setIsMediaLoading(false)}
+              onError={() => setIsMediaLoading(false)}
               className="w-full h-auto max-h-[80vh] object-contain cursor-zoom-in animate-fade-in" 
               onClick={() => setIsZoomed(true)}
             />
@@ -298,6 +529,8 @@ const PostCard: React.FC<PostCardProps> = ({
             <video 
               src={post.videoURL} 
               preload="metadata"
+              onLoadedData={() => setIsMediaLoading(false)}
+              onError={() => setIsMediaLoading(false)}
               className="w-full h-auto max-h-[80vh] object-contain" 
               controls={!post.isTakenDown} 
               playsInline 

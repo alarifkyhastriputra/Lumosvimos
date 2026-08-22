@@ -62,46 +62,21 @@ const Header: React.FC<HeaderProps> = ({
   };
 
   return (
-    <header className="sticky top-0 z-50 bg-white border-b border-black/10 px-4 py-3 backdrop-blur-md bg-white/80">
-      <div className="flex items-center w-full space-x-2">
-        <button 
-          onClick={onLeaderboardClick}
-          className="w-9 h-9 flex items-center justify-center border-2 border-black rounded-full hover:bg-black hover:text-white transition-all active:scale-90"
-          title="Elite Rankings"
-        >
-          <i className="fas fa-medal text-xs"></i>
-        </button>
+    <header className="sticky top-0 z-50 bg-white/95 border-b border-black/10 px-3.5 py-2.5 backdrop-blur-md shadow-xs">
+      <div className="flex items-center w-full justify-between gap-2 max-w-4xl mx-auto">
+        <div className="flex items-center shrink-0 cursor-pointer" onClick={() => onSearch('')}>
+          <h1 className="text-lg font-black tracking-tighter text-black">VIMOS</h1>
+        </div>
 
-        {onShopClick && (
-          <button 
-            onClick={onShopClick}
-            className="h-9 px-3 flex items-center justify-center space-x-1 border-2 border-black bg-yellow-400 hover:bg-yellow-300 text-black rounded-full transition-all active:scale-90 shadow-sm"
-            title={t('shop')}
-          >
-            <i className="fas fa-store text-xs"></i>
-            <span className="text-[10px] font-black uppercase">{t('shop')}</span>
-          </button>
-        )}
-
-        {isAdmin && (
-          <button 
-            onClick={onAdminClick}
-            className="w-9 h-9 flex items-center justify-center border-2 border-black bg-black text-white rounded-full hover:bg-white hover:text-black transition-all active:scale-90"
-            title={t('admin')}
-          >
-            <i className="fas fa-shield-halved text-xs"></i>
-          </button>
-        )}
-        
-        <div className="flex-1 relative" ref={dropdownRef}>
-          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
+        <div className="flex-1 relative min-w-0" ref={dropdownRef}>
+          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none">
             <i className="fas fa-search text-xs"></i>
           </span>
           <input
             type="search"
             value={query}
             placeholder={t('search')}
-            className="w-full bg-gray-50 border border-black/5 rounded-full pl-9 pr-4 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-black transition-all"
+            className="w-full bg-neutral-100/90 border border-transparent focus:border-black/20 focus:bg-white rounded-full pl-8 pr-3 py-1.5 text-xs text-black placeholder-neutral-400 focus:outline-none transition-all shadow-inner"
             onChange={(e) => setQuery(e.target.value)}
           />
 
@@ -122,10 +97,10 @@ const Header: React.FC<HeaderProps> = ({
                       <img 
                         src={user.photoURL || fallbackPhoto} 
                         alt={user.name} 
-                        className="w-10 h-10 rounded-full border border-black/10 mr-3 group-hover:border-white/20 object-cover" 
+                        className="w-9 h-9 rounded-full border border-black/10 mr-3 group-hover:border-white/20 object-cover" 
                       />
                       <div className="flex-1 min-w-0">
-                        <p className="font-bold text-sm truncate uppercase tracking-tight">{user.name || 'Unknown'}</p>
+                        <p className="font-bold text-xs truncate uppercase tracking-tight">{user.name || 'Unknown'}</p>
                         <p className="text-[9px] font-medium opacity-50 truncate">{(user.followers || []).length} Following</p>
                       </div>
                       <i className="fas fa-arrow-right text-xs opacity-0 group-hover:opacity-100 -translate-x-2 group-hover:translate-x-0 transition-all"></i>
@@ -136,9 +111,36 @@ const Header: React.FC<HeaderProps> = ({
             </div>
           )}
         </div>
-        
-        <div className="flex items-center">
-          <h1 className="text-lg font-black tracking-tighter ml-1">VIMOS</h1>
+
+        <div className="flex items-center shrink-0 space-x-1.5">
+          <button 
+            onClick={onLeaderboardClick}
+            className="w-8 h-8 flex items-center justify-center border border-neutral-300 rounded-full hover:bg-black hover:text-white transition-all active:scale-90 text-neutral-800"
+            title="Elite Rankings"
+          >
+            <i className="fas fa-medal text-xs"></i>
+          </button>
+
+          {onShopClick && (
+            <button 
+              onClick={onShopClick}
+              className="h-8 px-2 sm:px-3 flex items-center justify-center space-x-1 border border-neutral-900 bg-yellow-400 hover:bg-yellow-300 text-black rounded-full transition-all active:scale-90 shadow-xs"
+              title={t('shop')}
+            >
+              <i className="fas fa-store text-xs"></i>
+              <span className="text-[10px] font-black uppercase hidden sm:inline">{t('shop')}</span>
+            </button>
+          )}
+
+          {isAdmin && (
+            <button 
+              onClick={onAdminClick}
+              className="w-8 h-8 flex items-center justify-center border border-black bg-black text-white rounded-full hover:bg-white hover:text-black transition-all active:scale-90 shadow-xs"
+              title={t('admin')}
+            >
+              <i className="fas fa-shield-halved text-xs"></i>
+            </button>
+          )}
         </div>
       </div>
     </header>

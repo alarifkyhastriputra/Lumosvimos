@@ -82,7 +82,7 @@ const Navbar: React.FC<NavbarProps> = ({ activeView, onViewChange, unreadCount =
                 )}
               </div>
 
-              <span className={`text-[8.5px] font-bold tracking-tight mt-1 transition-colors leading-none truncate max-w-[46px] ${
+              <span className={`text-[8.5px] font-bold tracking-tighter mt-1 transition-colors leading-none whitespace-nowrap overflow-hidden text-ellipsis ${
                 isActive 
                   ? tab.isLive ? 'text-red-600 font-black' : 'text-black font-black'
                   : tab.isLive ? 'text-red-500' : 'text-neutral-400 group-hover:text-neutral-600'

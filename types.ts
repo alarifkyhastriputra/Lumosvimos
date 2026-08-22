@@ -26,6 +26,26 @@ export interface Story {
   userPhoto: string;
   text?: string;
   photoURL?: string;
+  videoURL?: string;
+  mediaType?: 'image' | 'video';
+  createdAt: number;
+  expiresAt?: number;
+}
+
+export interface GlobalSound {
+  id: string;
+  title: string;
+  author: string;
+  thumbnailUrl: string;
+  sourceType: 'youtube' | 'preset' | 'upload';
+  url: string; // e.g. "youtube:VIDEO_ID?start=0&end=30" or mp3 URL
+  youtubeId?: string;
+  startTime?: number; // in seconds
+  endTime?: number; // in seconds
+  duration?: number;
+  useCount: number;
+  addedByUserId?: string;
+  addedByUserName?: string;
   createdAt: number;
 }
 
@@ -38,6 +58,11 @@ export interface Post {
   photoURL?: string;
   videoURL?: string;
   musicURL?: string;
+  musicTitle?: string;
+  musicAuthor?: string;
+  musicThumbnail?: string;
+  musicStart?: number;
+  musicEnd?: number;
   timestamp: number;
   likes: string[]; // array of user IDs
   dislikes: string[];

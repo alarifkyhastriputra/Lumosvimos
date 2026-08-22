@@ -5,6 +5,7 @@ import UserListModal from './UserListModal.tsx';
 import PostCard from './PostCard.tsx';
 import { useLanguage } from '../LanguageContext.tsx';
 import { SHOP_ITEMS } from './Shop.tsx';
+import { compressImage } from '../services/imageCompressor.ts';
 
 interface ProfileProps {
   user: User;
@@ -75,14 +76,19 @@ const Profile = ({
     setIsEditing(false);
   };
 
-  const handleCaptureUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleCaptureUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        onAddCapture(reader.result as string);
-      };
-      reader.readAsDataURL(file);
+      try {
+        const compressed = await compressImage(file, 1080, 1080, 0.82);
+        onAddCapture(compressed);
+      } catch {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          onAddCapture(reader.result as string);
+        };
+        reader.readAsDataURL(file);
+      }
     }
   };
 
@@ -150,12 +156,17 @@ const Profile = ({
             <div className="absolute inset-0 rounded-full bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center cursor-pointer">
               <label className="cursor-pointer flex items-center justify-center w-full h-full">
                 <i className="fas fa-camera text-white text-xl"></i>
-                <input type="file" accept="image/*" className="hidden" onChange={(e) => {
+                <input type="file" accept="image/*" className="hidden" onChange={async (e) => {
                   const file = e.target.files?.[0];
                   if (file) {
-                    const reader = new FileReader();
-                    reader.onloadend = () => onUpdateProfile({ photoURL: reader.result as string });
-                    reader.readAsDataURL(file);
+                    try {
+                      const compressed = await compressImage(file, 400, 400, 0.85);
+                      onUpdateProfile({ photoURL: compressed });
+                    } catch {
+                      const reader = new FileReader();
+                      reader.onloadend = () => onUpdateProfile({ photoURL: reader.result as string });
+                      reader.readAsDataURL(file);
+                    }
                   }
                 }} />
               </label>

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { User, Announcement, SellerApplication, UserShop } from '../types.ts';
 import { ref, onValue, update, set, push, remove, get } from 'firebase/database';
 import { db } from '../firebase.ts';
+import AdsManager from './AdsManager.tsx';
 
 interface AdminPanelProps {
   users: User[];
@@ -22,7 +23,7 @@ const PRESET_COLORS = [
 export const AdminPanel: React.FC<AdminPanelProps> = ({ 
   users, announcements, onAddAnnouncement, onUpdateAnnouncement, onDeleteAnnouncement, onSetRole, onBanUser, onUserClick, onToggleAdmin
 }) => {
-  const [activeTab, setActiveTab] = useState<'kyc' | 'users' | 'broadcast'>('kyc');
+  const [activeTab, setActiveTab] = useState<'kyc' | 'users' | 'broadcast' | 'ads'>('kyc');
   const [adminSearch, setAdminSearch] = useState('');
   const [editingRoleUser, setEditingRoleUser] = useState<User | null>(null);
   const [newRoleValue, setNewRoleValue] = useState('');
@@ -355,6 +356,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             <i className="fas fa-bullhorn"></i>
             <span>Broadcast Center</span>
             {activeTab === 'broadcast' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-amber-400 rounded-full shadow-md shadow-amber-400"></div>}
+          </button>
+
+          <button 
+            onClick={() => setActiveTab('ads')}
+            className={`pb-2.5 transition-all flex items-center space-x-2 relative cursor-pointer ${
+              activeTab === 'ads' ? 'text-amber-400 font-black' : 'text-neutral-400 hover:text-white'
+            }`}
+          >
+            <i className="fas fa-rectangle-ad"></i>
+            <span>Manajemen Iklan (GUI)</span>
+            {activeTab === 'ads' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-amber-400 rounded-full shadow-md shadow-amber-400"></div>}
           </button>
         </div>
       </div>
@@ -826,6 +838,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             Klik di luar gambar atau tombol X untuk menutup
           </div>
         </div>
+      )}
+
+      {/* ============================================================= */}
+      {/* TAB 4: ADS MANAGEMENT GUI */}
+      {/* ============================================================= */}
+      {activeTab === 'ads' && (
+        <AdsManager currentUser={users[0] || ({} as User)} />
       )}
 
       {/* REJECTION REASON MODAL */}

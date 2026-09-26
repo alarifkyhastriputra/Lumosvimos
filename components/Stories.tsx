@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Story, User } from '../types.ts';
 import { useLanguage } from '../LanguageContext.tsx';
+import { compressImage } from '../services/imageCompressor.ts';
 
 interface StoriesProps {
   stories: Story[];
@@ -33,14 +34,16 @@ const Stories: React.FC<StoriesProps> = ({
   const { t } = useLanguage();
   const [isAdding, setIsAdding] = useState(false);
   const [text, setText] = useState('');
-  const [mediaPreview, setMediaPreview] = useState<{ url: string; type: 'image' | 'video' } | null>(null);
+  const [mediaPreview, setMediaPreview] = useState<{ url: string; type: 'image' | 'video'; duration?: number } | null>(null);
+  const [isProcessingMedia, setIsProcessingMedia] = useState(false);
   const [activeStoryIndex, setActiveStoryIndex] = useState<number | null>(null);
   const [isPaused, setIsPaused] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [progress, setProgress] = useState(0);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const photoInputRef = useRef<HTMLInputElement>(null);
+  const videoInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const activeStory = activeStoryIndex !== null && activeStoryIndex < stories.length ? stories[activeStoryIndex] : null;
@@ -91,19 +94,59 @@ const Stories: React.FC<StoriesProps> = ({
     }
   }, [isPaused, activeStoryIndex]);
 
-  const handleMediaUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      const isVideo = file.type.startsWith('video/');
+    if (!file) return;
+
+    setIsProcessingMedia(true);
+    try {
+      const compressed = await compressImage(file, 1080, 1920, 0.82);
+      setMediaPreview({
+        url: compressed,
+        type: 'image'
+      });
+    } catch {
       const reader = new FileReader();
       reader.onloadend = () => {
-        setMediaPreview({
-          url: reader.result as string,
-          type: isVideo ? 'video' : 'image'
-        });
+        if (typeof reader.result === 'string') {
+          setMediaPreview({
+            url: reader.result,
+            type: 'image'
+          });
+        }
       };
       reader.readAsDataURL(file);
+    } finally {
+      setIsProcessingMedia(false);
+      if (e.target) e.target.value = '';
     }
+  };
+
+  const handleVideoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 25 * 1024 * 1024) {
+      alert('Ukuran video maksimal 25 MB agar dapat dimuat dengan cepat.');
+      return;
+    }
+
+    setIsProcessingMedia(true);
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      if (typeof reader.result === 'string') {
+        setMediaPreview({
+          url: reader.result,
+          type: 'video'
+        });
+      }
+      setIsProcessingMedia(false);
+    };
+    reader.onerror = () => {
+      setIsProcessingMedia(false);
+    };
+    reader.readAsDataURL(file);
+    if (e.target) e.target.value = '';
   };
 
   const handleAdd = () => {
@@ -291,8 +334,16 @@ const Stories: React.FC<StoriesProps> = ({
               onChange={(e) => setText(e.target.value)}
             />
 
+            {/* Media Processing Loading State */}
+            {isProcessingMedia && (
+              <div className="py-8 bg-neutral-50 rounded-2xl border border-neutral-200/80 mb-3 flex flex-col items-center justify-center space-y-2">
+                <i className="fas fa-spinner fa-spin text-xl text-black"></i>
+                <p className="text-xs font-bold text-neutral-600">Memproses media...</p>
+              </div>
+            )}
+
             {/* Media Preview (Photo or Video) */}
-            {mediaPreview && (
+            {mediaPreview && !isProcessingMedia && (
               <div className="relative mb-4 rounded-2xl overflow-hidden aspect-video bg-neutral-950 border border-neutral-200 shadow-inner flex items-center justify-center">
                 {mediaPreview.type === 'video' ? (
                   <video 
@@ -311,9 +362,9 @@ const Stories: React.FC<StoriesProps> = ({
                   />
                 )}
                 
-                <div className="absolute top-2 left-2 bg-black/60 backdrop-blur-md px-2.5 py-1 rounded-full text-[10px] text-white font-bold flex items-center space-x-1 border border-white/10">
-                  <i className={mediaPreview.type === 'video' ? 'fas fa-video text-amber-400' : 'fas fa-image text-cyan-400'}></i>
-                  <span>{mediaPreview.type === 'video' ? 'Video Terpilih' : 'Foto Terpilih'}</span>
+                <div className="absolute top-2 left-2 bg-black/70 backdrop-blur-md px-2.5 py-1 rounded-full text-[10px] text-white font-black flex items-center space-x-1.5 border border-white/10 shadow-sm">
+                  <i className={mediaPreview.type === 'video' ? 'fas fa-video text-amber-400' : 'fas fa-image text-emerald-400'}></i>
+                  <span>{mediaPreview.type === 'video' ? 'Video Story' : 'Foto Story'}</span>
                 </div>
 
                 <button 
@@ -326,32 +377,50 @@ const Stories: React.FC<StoriesProps> = ({
               </div>
             )}
 
-            <div className="flex items-center justify-between pt-1">
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
               <div className="flex items-center space-x-1.5">
                 <button 
                   type="button"
-                  onClick={() => fileInputRef.current?.click()} 
+                  onClick={() => photoInputRef.current?.click()} 
                   className="px-3 py-2 rounded-xl bg-neutral-100 hover:bg-neutral-200 text-neutral-800 text-xs font-bold transition-all flex items-center space-x-1.5 active:scale-95 border border-neutral-200/60"
-                  title="Pilih Foto atau Video"
+                  title="Pilih Foto dari Galeri"
                 >
-                  <i className="fas fa-photo-film text-neutral-700"></i>
-                  <span>{mediaPreview ? 'Ganti Media' : 'Foto / Video'}</span>
+                  <i className="fas fa-image text-emerald-600"></i>
+                  <span>Foto</span>
+                </button>
+
+                <button 
+                  type="button"
+                  onClick={() => videoInputRef.current?.click()} 
+                  className="px-3 py-2 rounded-xl bg-neutral-100 hover:bg-neutral-200 text-neutral-800 text-xs font-bold transition-all flex items-center space-x-1.5 active:scale-95 border border-neutral-200/60"
+                  title="Pilih Video dari Galeri"
+                >
+                  <i className="fas fa-video text-amber-600"></i>
+                  <span>Video</span>
                 </button>
               </div>
 
               <input 
                 type="file" 
-                ref={fileInputRef} 
-                onChange={handleMediaUpload} 
-                accept="image/*,video/*" 
+                ref={photoInputRef} 
+                onChange={handlePhotoUpload} 
+                accept="image/*" 
+                className="hidden" 
+              />
+
+              <input 
+                type="file" 
+                ref={videoInputRef} 
+                onChange={handleVideoUpload} 
+                accept="video/*" 
                 className="hidden" 
               />
               
               <button 
                 type="button"
                 onClick={handleAdd}
-                disabled={!text.trim() && !mediaPreview}
-                className="bg-black text-white px-5 py-2.5 rounded-full font-bold text-xs hover:bg-neutral-800 disabled:opacity-40 transition-all shadow-xs flex items-center space-x-1.5 active:scale-95"
+                disabled={(!text.trim() && !mediaPreview) || isProcessingMedia}
+                className="bg-black text-white px-5 py-2.5 rounded-full font-black text-xs hover:bg-neutral-800 disabled:opacity-40 transition-all shadow-md flex items-center space-x-1.5 active:scale-95"
               >
                 <i className="fas fa-paper-plane text-[10px]"></i>
                 <span>Bagikan Story</span>

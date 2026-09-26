@@ -293,8 +293,8 @@ const Feed: React.FC<FeedProps> = ({
               onDeletePost={onDeletePost}
               users={users}
             />
-            {(index + 1) % 7 === 0 && (
-              <NativeAdCard slotId={Math.floor((index + 1) / 7)} />
+            {((index + 1) === 4 || ((index + 1) > 4 && (index + 1 - 4) % 6 === 0)) && (
+              <NativeAdCard slotId={Math.floor((index + 1) / 5)} />
             )}
           </React.Fragment>
         ))

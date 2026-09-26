@@ -14,6 +14,7 @@ import AuthScreen from './components/AuthScreen.tsx';
 import AdminPanel from './components/AdminPanel.tsx';
 import Shop from './components/Shop.tsx';
 import SinglePostView from './components/SinglePostView.tsx';
+import AdsManager from './components/AdsManager.tsx';
 import { auth, db } from './firebase.ts';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { ref, onValue, set, update, push, remove, query, limitToLast, get, onDisconnect, serverTimestamp, Unsubscribe as DBUnsubscribe } from 'firebase/database';
@@ -820,26 +821,47 @@ export default function App() {
         })).sort((a, b) => b.timestamp - a.timestamp);
         setNotifications(list);
 
-        // Check for new group invite
-        const latestInvite = list.find(n => 
-          n.type === 'group_invite' && 
+        // Check for any new unread notification (likes, comments, follows, mentions, replies, group invites, orders)
+        const newUnreadNotifs = list.filter(n => 
           !n.read && 
           n.timestamp > mountTimeRef.current - 5000 && 
           !seenChatMsgIdsRef.current.has(n.id)
         );
-        if (latestInvite) {
-          seenChatMsgIdsRef.current.add(latestInvite.id);
+
+        if (newUnreadNotifs.length > 0) {
+          const latest = newUnreadNotifs[0];
+          seenChatMsgIdsRef.current.add(latest.id);
           playChatNotificationSound();
+
+          let notificationText = '';
+          if (latest.type === 'group_invite') {
+            notificationText = `✉️ Mengundang Anda bergabung ke grup "${latest.groupName || 'Collective'}".`;
+          } else if (latest.type === 'like') {
+            notificationText = `❤️ Menyukai postingan Anda: "${latest.postText || 'Postingan'}"`;
+          } else if (latest.type === 'comment') {
+            notificationText = `💬 Mengomentari: "${latest.commentText || latest.postText || 'Postingan'}"`;
+          } else if (latest.type === 'reply') {
+            notificationText = `↩️ Membalas komentar: "${latest.commentText || ''}"`;
+          } else if (latest.type === 'mention') {
+            notificationText = `🏷️ Menyebut Anda dalam komentar: "${latest.commentText || ''}"`;
+          } else if (latest.type === 'follow') {
+            notificationText = `👤 Mulai mengikuti Anda!`;
+          } else if (latest.type === 'group_accepted') {
+            notificationText = `🎉 Bergabung ke grup "${latest.groupName || 'Collective'}"!`;
+          } else {
+            notificationText = latest.commentText || 'Notifikasi baru';
+          }
+
           setIncomingChatPayload({
-            id: latestInvite.id,
-            senderId: latestInvite.senderId,
-            senderName: latestInvite.senderName,
-            senderPhoto: latestInvite.senderPhoto,
-            text: `✉️ Mengundang Anda bergabung ke grup "${latestInvite.groupName || 'Collective'}". Klik notifikasi untuk menerima!`,
-            timestamp: latestInvite.timestamp,
-            chatType: 'group',
-            targetId: latestInvite.groupId || '',
-            groupName: latestInvite.groupName || 'Collective'
+            id: latest.id,
+            senderId: latest.senderId,
+            senderName: latest.senderName,
+            senderPhoto: latest.senderPhoto,
+            text: notificationText,
+            timestamp: latest.timestamp,
+            chatType: latest.groupId ? 'group' : 'user',
+            targetId: latest.groupId || latest.senderId,
+            groupName: latest.groupName
           });
         }
       } else {
@@ -1916,6 +1938,12 @@ export default function App() {
             }}
             onUserClick={(id) => { setSelectedProfileId(id); setCurrentView(View.PROFILE); }}
             onToggleAdmin={handleToggleAdmin}
+          />
+        )}
+        {currentView === View.ADS && (
+          <AdsManager 
+            currentUser={currentUser}
+            onClose={() => setCurrentView(View.FEED)}
           />
         )}
       </main>

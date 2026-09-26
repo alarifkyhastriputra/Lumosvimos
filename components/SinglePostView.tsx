@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Post, User } from '../types';
 import PostCard from './PostCard';
+import NativeAdCard from './NativeAdCard';
 
 interface SinglePostViewProps {
   postId: string;
@@ -96,6 +97,7 @@ export const SinglePostView: React.FC<SinglePostViewProps> = ({
             onDeletePost={onDeletePost}
             users={users}
           />
+          <NativeAdCard slotId="single-post" />
         </div>
       )}
     </div>

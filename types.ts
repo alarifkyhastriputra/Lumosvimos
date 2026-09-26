@@ -225,6 +225,36 @@ export interface ShopOrder {
   timestamp: number;
 }
 
+export interface CustomAdCampaign {
+  id: string;
+  title: string;
+  sponsorName: string;
+  description?: string;
+  bannerImage: string;
+  targetUrl: string;
+  ctaText: string;
+  isActive: boolean;
+  impressions?: number;
+  clicks?: number;
+  createdAt: number;
+}
+
+export interface AdConfig {
+  isEnabled: boolean;
+  scriptUrl: string;
+  containerId: string;
+  customSnippet?: string;
+  feedFrequency: number; // e.g. every 5 posts, 0 to disable
+  showInSinglePost: boolean;
+  showInShop: boolean;
+  showInLeaderboard: boolean;
+  showStickyBanner: boolean;
+  sponsorBadgeText: string;
+  executionMode?: 'iframe' | 'direct';
+  customAds?: Record<string, CustomAdCampaign>;
+  lastUpdated?: number;
+}
+
 export const View = {
   FEED: 'feed',
   REELS: 'reels',
@@ -234,7 +264,8 @@ export const View = {
   CHAT: 'chat',
   PROFILE: 'profile',
   ADMIN: 'admin',
-  SHOP: 'shop'
+  SHOP: 'shop',
+  ADS: 'ads'
 } as const;
 
 export type View = typeof View[keyof typeof View];

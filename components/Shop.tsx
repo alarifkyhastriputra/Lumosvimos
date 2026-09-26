@@ -4,6 +4,7 @@ import { useLanguage } from '../LanguageContext.tsx';
 import { ref, onValue, push, set, update, remove, serverTimestamp, get, query, limitToLast } from 'firebase/database';
 import { db } from '../firebase.ts';
 import { compressImage } from '../services/imageCompressor.ts';
+import NativeAdCard from './NativeAdCard.tsx';
 
 // High-performance persistent memory cache for instant, 0-latency Shop loading
 let memShops: UserShop[] | null = null;
@@ -1197,6 +1198,11 @@ export const Shop: React.FC<ShopProps> = ({ currentUser, onUpdateUser, onNavigat
                 )}
               </div>
             )}
+
+            {/* Ad Banner Card */}
+            <div className="pt-2">
+              <NativeAdCard slotId="shop-explore" />
+            </div>
           </div>
         )}
 

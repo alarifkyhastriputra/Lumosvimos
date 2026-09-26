@@ -178,9 +178,17 @@ const PostCard: React.FC<PostCardProps> = ({
   const isMe = currentUser.id === post.userId;
   const hasLiked = (post.likes || []).includes(currentUser.id);
   const hasDisliked = (post.dislikes || []).includes(currentUser.id);
-  const isAdmin = currentUser.isAdmin;
 
-  const fallbackPhoto = `https://api.dicebear.com/7.x/initials/svg?seed=${post.userName}&backgroundColor=000000&fontFamily=Inter&fontWeight=700`;
+  const fallbackPhoto = `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(post.userName || 'Member')}&backgroundColor=000000&fontFamily=Inter&fontWeight=700`;
+
+  const displayAuthorName = isMe 
+    ? (currentUser.name || postUser?.name || post.userName || 'Member')
+    : (postUser?.name || post.userName || 'Member');
+
+  const displayAuthorPhoto = isMe
+    ? (currentUser.photoURL || postUser?.photoURL || post.userPhoto || fallbackPhoto)
+    : (postUser?.photoURL || post.userPhoto || fallbackPhoto);
+  const isAdmin = currentUser.isAdmin;
 
   const formattedDate = new Date(post.timestamp).toLocaleDateString('en-US', {
     month: 'short',
@@ -354,8 +362,8 @@ const PostCard: React.FC<PostCardProps> = ({
       <div className="p-4 flex items-center space-x-3">
         <div className="relative">
           <img 
-            src={post.userPhoto || fallbackPhoto} 
-            alt={post.userName} 
+            src={displayAuthorPhoto} 
+            alt={displayAuthorName} 
             loading="lazy"
             decoding="async"
             className="w-10 h-10 rounded-full object-cover cursor-pointer border border-gray-100"
@@ -365,7 +373,7 @@ const PostCard: React.FC<PostCardProps> = ({
         <div className="flex-1 min-w-0">
           <div className="flex items-center space-x-2 flex-wrap gap-y-1">
             <h3 className="font-bold text-sm cursor-pointer hover:underline truncate" onClick={() => onUserClick(post.userId)}>
-              {post.userName || 'Anonymous'}
+              {displayAuthorName}
             </h3>
             
             {/* Custom Role Badge with color */}

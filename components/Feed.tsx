@@ -3,6 +3,7 @@ import React from 'react';
 import { Post, User, Announcement, Story } from '../types.ts';
 import PostCard from './PostCard.tsx';
 import Stories from './Stories.tsx';
+import NativeAdCard from './NativeAdCard.tsx';
 import { useLanguage } from '../LanguageContext.tsx';
 
 interface FeedProps {
@@ -193,20 +194,24 @@ const Feed: React.FC<FeedProps> = ({
           </div>
         </div>
       ) : (
-        posts.map((post) => (
-          <PostCard 
-            key={post.id} 
-            post={post} 
-            onLike={onLike} 
-            onDislike={onDislike}
-            onComment={onComment}
-            onUserClick={onUserClick}
-            currentUser={currentUser}
-            onFollow={onFollow}
-            onTakeDownPost={onTakeDownPost}
-            onDeletePost={onDeletePost}
-            users={users}
-          />
+        posts.map((post, index) => (
+          <React.Fragment key={post.id}>
+            <PostCard 
+              post={post} 
+              onLike={onLike} 
+              onDislike={onDislike}
+              onComment={onComment}
+              onUserClick={onUserClick}
+              currentUser={currentUser}
+              onFollow={onFollow}
+              onTakeDownPost={onTakeDownPost}
+              onDeletePost={onDeletePost}
+              users={users}
+            />
+            {(index + 1) % 7 === 0 && (
+              <NativeAdCard slotId={Math.floor((index + 1) / 7)} />
+            )}
+          </React.Fragment>
         ))
       )}
     </div>

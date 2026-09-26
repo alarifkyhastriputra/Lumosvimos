@@ -210,13 +210,20 @@ export default function App() {
               update(userRef, { isAdmin: true });
             }
 
-            // Fix legacy Anonymous Shadow/Orbit name in database if present
-            const cleanName = (!data.name || data.name === 'Anonymous Shadow' || data.name === 'Anonymous Orbit' || data.name === 'Anonymous')
-              ? fallbackAccountName
-              : data.name;
+            // Synchronize Google account displayName & photoURL into user record if logged in via Google/Gmail
+            const googleDisplayName = user.displayName?.trim();
+            const cleanName = (isGoogleAccount && googleDisplayName) 
+              ? googleDisplayName 
+              : ((!data.name || data.name === 'Anonymous Shadow' || data.name === 'Anonymous Orbit' || data.name === 'Anonymous' || data.name === 'Member') 
+                  ? fallbackAccountName 
+                  : data.name);
 
             if (cleanName !== data.name) {
               update(userRef, { name: cleanName });
+            }
+
+            if (user.photoURL && (!data.photoURL || data.photoURL.includes('dicebear'))) {
+              update(userRef, { photoURL: user.photoURL });
             }
 
             const activeUserData = { 
@@ -451,7 +458,7 @@ export default function App() {
 
     const postLoadingTimer = setTimeout(() => {
       setLoadingPosts(false);
-    }, 2200);
+    }, 300);
 
     const unsubscribePosts = onValue(postsQuery, (snapshot) => {
       const data = snapshot.val();
@@ -463,9 +470,17 @@ export default function App() {
           dislikes: val.dislikes ? Object.keys(val.dislikes) : [],
           comments: val.comments ? Object.entries(val.comments).map(([cid, cval]: [string, any]) => ({ id: cid, ...cval })) : []
         }));
-        const sorted = postList.sort((a, b) => b.timestamp - a.timestamp);
-        setPosts(sorted);
-        try { localStorage.setItem('vimos_posts', JSON.stringify(sorted.slice(0, 20))); } catch {}
+        
+        setPosts(prev => {
+          const tempPosts = prev.filter(p => p.id.startsWith('temp_'));
+          const combined = [...tempPosts, ...postList];
+          const uniqueMap = new Map();
+          combined.forEach(p => uniqueMap.set(p.id, p));
+          const sorted = Array.from(uniqueMap.values()).sort((a, b) => b.timestamp - a.timestamp);
+          try { localStorage.setItem('vimos_posts', JSON.stringify(sorted.slice(0, 25))); } catch {}
+          return sorted;
+        });
+        setLoadingPosts(false);
       } else {
         // Seed default posts if RTDB node is empty so users have initial content
         initialPosts.forEach(p => {
@@ -1211,13 +1226,17 @@ export default function App() {
     musicEnd?: number;
   }) => {
     if (!currentUser) return;
-    const tempPostId = `temp_${Date.now()}`;
+    const now = Date.now();
+    const tempPostId = `temp_${now}_${Math.random().toString(36).substring(2, 6)}`;
+    const currentAuthorName = currentUser.name || 'Member';
+    const currentAuthorPhoto = currentUser.photoURL || '';
+
     const newPost: Post = {
       id: tempPostId,
       userId: currentUser.id,
-      userName: currentUser.name || 'Anonymous Orbit',
-      userPhoto: currentUser.photoURL || '',
-      timestamp: Date.now(),
+      userName: currentAuthorName,
+      userPhoto: currentAuthorPhoto,
+      timestamp: now,
       text: data.text,
       photoURL: data.photoURL || undefined,
       videoURL: data.videoURL || undefined,
@@ -1232,14 +1251,22 @@ export default function App() {
       comments: []
     };
 
-    // Optimistic UI insertion
+    // 1. Instant local state update for zero latency
     setPosts(prev => [newPost, ...prev]);
+    setLoadingPosts(false);
 
+    // 2. Write to local storage cache immediately
+    try {
+      const storedPosts = JSON.parse(localStorage.getItem('vimos_posts') || '[]');
+      localStorage.setItem('vimos_posts', JSON.stringify([newPost, ...storedPosts].slice(0, 25)));
+    } catch {}
+
+    // 3. Save to Firebase RTDB asynchronously
     push(ref(db, 'posts'), {
       userId: currentUser.id,
-      userName: currentUser.name || 'Anonymous Orbit',
-      userPhoto: currentUser.photoURL || '',
-      timestamp: Date.now(),
+      userName: currentAuthorName,
+      userPhoto: currentAuthorPhoto,
+      timestamp: now,
       text: data.text,
       photoURL: data.photoURL || null,
       videoURL: data.videoURL || null,

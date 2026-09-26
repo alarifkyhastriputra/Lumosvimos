@@ -210,36 +210,50 @@ export const Shop: React.FC<ShopProps> = ({ currentUser, onUpdateUser, onNavigat
     }
   }, [myShop]);
 
+  // Auto sync form defaults when currentUser is loaded
+  useEffect(() => {
+    if (currentUser) {
+      if (!kycFullName && currentUser.name) setKycFullName(currentUser.name);
+      if (!kycOwnerPhoto && currentUser.photoURL) setKycOwnerPhoto(currentUser.photoURL);
+    }
+  }, [currentUser]);
+
   // Submit Seller Verification Application to Admin
   const handleSubmitKYCApplication = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!kycFullName.trim() || !kycPhoneWA.trim() || !kycAddress.trim() || !kycShopName.trim()) {
-      showToast('Harap lengkapi semua kolom bertanda bintang (*).', 'error');
+    if (!currentUser || !currentUser.id) {
+      showToast('Sesi login tidak terdeteksi. Silakan muat ulang halaman.', 'error');
       return;
     }
 
-    const photoToUse = kycOwnerPhoto.trim() || currentUser.photoURL || '';
-    if (!photoToUse) {
-      showToast('Wajib mengunggah atau menggunakan Foto Pengguna / Profil Anda!', 'error');
+    const trimmedFullName = kycFullName.trim() || currentUser.name || 'Pemilik Toko';
+    const trimmedPhoneWA = kycPhoneWA.trim();
+    const trimmedAddress = kycAddress.trim();
+    const trimmedShopName = kycShopName.trim();
+
+    if (!trimmedFullName || !trimmedPhoneWA || !trimmedAddress || !trimmedShopName) {
+      showToast('Harap isi Nama Pemilik, Nomor WhatsApp, Alamat Domisili, dan Nama Toko.', 'error');
       return;
     }
+
+    const photoToUse = kycOwnerPhoto.trim() || currentUser.photoURL || `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(trimmedFullName)}`;
 
     setIsSubmittingKYC(true);
     const now = Date.now();
     const applicationData: SellerApplication = {
       id: `app_${currentUser.id}`,
       userId: currentUser.id,
-      userName: currentUser.name,
+      userName: currentUser.name || trimmedFullName,
       userEmail: currentUser.email || '',
-      userPhoto: currentUser.photoURL || '',
-      fullName: kycFullName.trim(),
+      userPhoto: currentUser.photoURL || photoToUse,
+      fullName: trimmedFullName,
       ownerPhotoURL: photoToUse,
-      phoneWhatsapp: kycPhoneWA.trim(),
+      phoneWhatsapp: trimmedPhoneWA,
       province: kycProvince.trim() || 'Indonesia',
       city: kycCity.trim() || 'Kota',
-      address: kycAddress.trim(),
-      shopName: kycShopName.trim(),
-      shopCategory: kycShopCategory,
+      address: trimmedAddress,
+      shopName: trimmedShopName,
+      shopCategory: kycShopCategory || 'Fashion',
       shopDescription: kycShopDesc.trim() || 'Toko Resmi Vimos',
       shopBannerURL: kycShopBanner.trim() || 'https://images.unsplash.com/photo-1441986300917-64674bd600d8?w=1200&auto=format&fit=crop&q=80',
       status: 'pending',
@@ -247,21 +261,29 @@ export const Shop: React.FC<ShopProps> = ({ currentUser, onUpdateUser, onNavigat
     };
 
     try {
-      // Save application to database under private isolated node
-      await set(ref(db, `sellerApplications/${currentUser.id}`), applicationData);
+      // Clean object to ensure NO undefined keys exist before Firebase RTDB call
+      const sanitizedApp = JSON.parse(JSON.stringify(applicationData));
+
+      // 1. Save application to database under private isolated node
+      await set(ref(db, `sellerApplications/${currentUser.id}`), sanitizedApp);
       
-      // Update local and user profile
+      // 2. Update user status in database
       await update(ref(db, `users/${currentUser.id}`), {
         sellerStatus: 'pending',
-        sellerApplicationId: applicationData.id
+        sellerApplicationId: sanitizedApp.id
       });
-      onUpdateUser({ sellerStatus: 'pending', sellerApplicationId: applicationData.id });
 
-      showToast('Pengajuan Akun Toko berhasil dikirim! Menunggu verifikasi Admin.', 'success');
+      // 3. Update local user state
+      onUpdateUser({ sellerStatus: 'pending', sellerApplicationId: sanitizedApp.id });
+
+      // 4. Update local state
+      setMyApplication(sanitizedApp as SellerApplication);
+
+      showToast('Pengajuan Akun Toko berhasil dikirim! Menunggu verifikasi Admin. 🎉', 'success');
       setIsFillingKYC(false);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error submitting seller application:', err);
-      showToast('Gagal mengirim pengajuan. Coba lagi.', 'error');
+      showToast(`Gagal mengirim pengajuan: ${err?.message || 'Koneksi terganggu'}`, 'error');
     } finally {
       setIsSubmittingKYC(false);
     }
@@ -393,6 +415,71 @@ export const Shop: React.FC<ShopProps> = ({ currentUser, onUpdateUser, onNavigat
         } catch (err) {
           console.error('Delete item error:', err);
           showToast('Gagal menghapus produk.', 'error');
+        }
+      }
+    });
+  };
+
+  // Delete Shop & all products (For Shop Owner & Admin)
+  const handleDeleteShop = (shopId: string, shopNameStr?: string, ownerId?: string) => {
+    const isOwner = currentUser.id === ownerId || myShop?.id === shopId;
+    const isAdmin = Boolean(currentUser.isAdmin);
+
+    if (!isOwner && !isAdmin) {
+      showToast('Anda tidak memiliki izin untuk menghapus toko ini.', 'error');
+      return;
+    }
+
+    setConfirmModal({
+      isOpen: true,
+      title: 'Hapus Toko & Semua Produk Permanen?',
+      message: `Apakah Anda yakin ingin menghapus toko ${shopNameStr ? `"${shopNameStr}"` : ''}? Seluruh produk di etalase toko ini akan dihapus secara permanen.`,
+      confirmText: 'Ya, Hapus Toko Permanen',
+      onConfirm: async () => {
+        setConfirmModal(null);
+        try {
+          // 1. Delete shop from RTDB
+          await remove(ref(db, `shops/${shopId}`));
+
+          // 2. Delete all shop items belonging to this shop
+          const itemsToDelete = items.filter(i => i.shopId === shopId);
+          for (const item of itemsToDelete) {
+            await remove(ref(db, `shopItems/${item.id}`));
+          }
+
+          // 3. Reset owner status
+          const targetOwnerId = ownerId || (isOwner ? currentUser.id : null);
+          if (targetOwnerId) {
+            await update(ref(db, `users/${targetOwnerId}`), {
+              isVerifiedSeller: false,
+              sellerStatus: 'unsubmitted',
+              sellerApplicationId: null
+            });
+            await remove(ref(db, `sellerApplications/${targetOwnerId}`));
+
+            if (targetOwnerId === currentUser.id) {
+              onUpdateUser({ isVerifiedSeller: false, sellerStatus: 'unsubmitted', sellerApplicationId: undefined });
+              setMyApplication(null);
+            } else {
+              // Send notification to the shop owner
+              const notifRef = push(ref(db, `notifications/${targetOwnerId}`));
+              await set(notifRef, {
+                id: notifRef.key,
+                senderId: currentUser.id,
+                senderName: currentUser.name || 'Admin Vimos',
+                senderPhoto: currentUser.photoURL || 'https://api.dicebear.com/7.x/bottts/svg?seed=vimos_admin',
+                type: 'comment',
+                commentText: `⚠️ Toko Anda "${shopNameStr || ''}" beserta produknya telah dihapus oleh Admin Vimos.`,
+                timestamp: Date.now(),
+                read: false
+              });
+            }
+          }
+
+          showToast(`Toko ${shopNameStr ? `"${shopNameStr}"` : ''} dan seluruh produknya berhasil dihapus.`, 'success');
+        } catch (err) {
+          console.error('Delete shop error:', err);
+          showToast('Gagal menghapus toko.', 'error');
         }
       }
     });
@@ -678,7 +765,7 @@ export const Shop: React.FC<ShopProps> = ({ currentUser, onUpdateUser, onNavigat
       </div>
 
       {/* CONTAINER */}
-      <div className="max-w-4xl mx-auto px-4 py-5">
+      <div className="max-w-6xl mx-auto px-3 sm:px-6 py-5 pb-28 sm:pb-32">
         {/* ============================================================= */}
         {/* TAB 1: EXPLORE / JELAJAHI PASAR */}
         {/* ============================================================= */}
@@ -898,12 +985,39 @@ export const Shop: React.FC<ShopProps> = ({ currentUser, onUpdateUser, onNavigat
                               </div>
 
                               {isMyOwnItem ? (
-                                <button
-                                  onClick={() => handleEditItemClick(item)}
-                                  className="bg-neutral-100 hover:bg-black hover:text-white text-neutral-700 px-2.5 py-1.5 rounded-xl text-[9px] font-black uppercase transition-all shadow-xs"
-                                >
-                                  Edit
-                                </button>
+                                <div className="flex items-center space-x-1 shrink-0">
+                                  <button
+                                    onClick={() => handleEditItemClick(item)}
+                                    className="bg-neutral-100 hover:bg-black hover:text-white text-neutral-700 px-2 py-1.5 rounded-xl text-[9px] font-black uppercase transition-all shadow-xs cursor-pointer"
+                                  >
+                                    Edit
+                                  </button>
+                                  <button
+                                    onClick={() => handleDeleteItem(item.id, item.name)}
+                                    className="bg-red-50 hover:bg-red-600 text-red-600 hover:text-white p-1.5 rounded-xl text-[9px] font-black transition-all shadow-xs cursor-pointer flex items-center space-x-1"
+                                    title="Hapus Produk"
+                                  >
+                                    <i className="fas fa-trash-can text-[9px]"></i>
+                                  </button>
+                                </div>
+                              ) : currentUser.isAdmin ? (
+                                <div className="flex items-center space-x-1 shrink-0">
+                                  <button
+                                    onClick={() => setSelectedItemToBuy(item)}
+                                    disabled={isOutOfStock}
+                                    className="bg-gradient-to-r from-amber-400 to-yellow-500 hover:from-amber-500 hover:to-yellow-600 disabled:from-neutral-200 disabled:to-neutral-300 text-black px-2.5 py-1.5 rounded-xl text-[9px] font-black uppercase shadow-xs transition-all active:scale-95 flex items-center space-x-1 cursor-pointer"
+                                  >
+                                    <i className="fas fa-bag-shopping text-[9px]"></i>
+                                    <span>Beli</span>
+                                  </button>
+                                  <button
+                                    onClick={() => handleDeleteItem(item.id, item.name)}
+                                    className="bg-red-50 hover:bg-red-600 text-red-600 hover:text-white p-1.5 rounded-xl text-[9px] font-black transition-all shadow-xs cursor-pointer flex items-center space-x-1"
+                                    title="Hapus Produk (Admin)"
+                                  >
+                                    <i className="fas fa-trash-can text-[9px]"></i>
+                                  </button>
+                                </div>
                               ) : (
                                 <button
                                   onClick={() => setSelectedItemToBuy(item)}
@@ -968,9 +1082,25 @@ export const Shop: React.FC<ShopProps> = ({ currentUser, onUpdateUser, onNavigat
                                 (e.target as HTMLElement).setAttribute('src', 'https://images.unsplash.com/photo-1441986300917-64674bd600d8?w=1200&auto=format&fit=crop&q=80');
                               }}
                             />
-                            <div className="absolute top-2.5 right-2.5 bg-black/70 backdrop-blur-md text-white text-[9px] font-black px-2.5 py-1 rounded-full flex items-center space-x-1 shadow-sm">
-                              <i className="fas fa-box text-amber-400"></i>
-                              <span>{shopItemCount} Produk</span>
+                            <div className="absolute top-2.5 right-2.5 flex items-center space-x-1.5">
+                              <span className="bg-black/70 backdrop-blur-md text-white text-[9px] font-black px-2.5 py-1 rounded-full flex items-center space-x-1 shadow-sm">
+                                <i className="fas fa-box text-amber-400"></i>
+                                <span>{shopItemCount} Produk</span>
+                              </span>
+
+                              {(isMyOwnShop || currentUser.isAdmin) && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleDeleteShop(shop.id, shop.shopName, shop.ownerId);
+                                  }}
+                                  className="bg-red-600/90 hover:bg-red-600 text-white text-[9px] font-black px-2.5 py-1 rounded-full backdrop-blur-md transition-all shadow-sm flex items-center space-x-1 cursor-pointer"
+                                  title="Hapus Toko ini"
+                                >
+                                  <i className="fas fa-trash-can text-[9px]"></i>
+                                  <span>Hapus</span>
+                                </button>
+                              )}
                             </div>
                           </div>
 
@@ -1051,7 +1181,7 @@ export const Shop: React.FC<ShopProps> = ({ currentUser, onUpdateUser, onNavigat
                       <div className="flex justify-between items-center border-b border-neutral-200 pb-1.5">
                         <span className="text-neutral-500 font-bold">Foto Pengguna / Toko:</span>
                         <img 
-                          src={myApplication.ownerPhotoURL || myApplication.userPhoto || currentUser.photoURL || ''} 
+                          src={myApplication.ownerPhotoURL || myApplication.userPhoto || currentUser.photoURL || `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(currentUser.name || 'User')}`} 
                           alt="Foto Pengguna" 
                           className="w-8 h-8 rounded-full object-cover border border-neutral-300"
                         />
@@ -1080,11 +1210,29 @@ export const Shop: React.FC<ShopProps> = ({ currentUser, onUpdateUser, onNavigat
                       </div>
                     </div>
 
-                    <div className="pt-2 max-w-md mx-auto">
+                    <div className="pt-2 max-w-md mx-auto space-y-3">
                       <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center space-x-2 text-emerald-900 text-[11px] text-left">
                         <i className="fas fa-shield-halved text-emerald-600 text-base shrink-0"></i>
                         <span>🔒 <strong>Anti-Pencurian Data:</strong> Data kontak dan alamat Anda dienkripsi dan diisolasi khusus untuk Admin. Tidak ada dokumen KTP/NIK yang disimpan.</span>
                       </div>
+
+                      <button
+                        onClick={() => {
+                          setKycFullName(myApplication.fullName || currentUser.name || '');
+                          setKycOwnerPhoto(myApplication.ownerPhotoURL || currentUser.photoURL || '');
+                          setKycPhoneWA(myApplication.phoneWhatsapp || '');
+                          setKycAddress(myApplication.address || '');
+                          setKycCity(myApplication.city || '');
+                          setKycProvince(myApplication.province || 'DKI Jakarta');
+                          setKycShopName(myApplication.shopName || '');
+                          setKycShopDesc(myApplication.shopDescription || '');
+                          setIsFillingKYC(true);
+                        }}
+                        className="w-full py-3 bg-neutral-900 hover:bg-black text-white text-xs font-black uppercase rounded-2xl shadow-md transition-all active:scale-95 flex items-center justify-center space-x-2 cursor-pointer"
+                      >
+                        <i className="fas fa-pen-to-square text-amber-400"></i>
+                        <span>Edit / Perbarui Data Pengajuan</span>
+                      </button>
                     </div>
                   </div>
                 ) : myApplication?.status === 'rejected' && !isFillingKYC ? (
@@ -1384,10 +1532,18 @@ export const Shop: React.FC<ShopProps> = ({ currentUser, onUpdateUser, onNavigat
                     <div className="absolute top-3 right-3 flex items-center space-x-2">
                       <button
                         onClick={() => setIsEditingShop(true)}
-                        className="bg-black/75 hover:bg-black text-white text-[10px] font-black px-3.5 py-1.5 rounded-xl backdrop-blur-md transition-all flex items-center space-x-1.5 shadow-md"
+                        className="bg-black/75 hover:bg-black text-white text-[10px] font-black px-3.5 py-1.5 rounded-xl backdrop-blur-md transition-all flex items-center space-x-1.5 shadow-md cursor-pointer"
                       >
                         <i className="fas fa-pencil"></i>
                         <span>Edit Toko</span>
+                      </button>
+                      <button
+                        onClick={() => myShop && handleDeleteShop(myShop.id, myShop.shopName, myShop.ownerId)}
+                        className="bg-red-600/85 hover:bg-red-600 text-white text-[10px] font-black px-3 py-1.5 rounded-xl backdrop-blur-md transition-all flex items-center space-x-1.5 shadow-md cursor-pointer"
+                        title="Hapus Toko Saya Secara Permanen"
+                      >
+                        <i className="fas fa-trash-can"></i>
+                        <span>Hapus Toko</span>
                       </button>
                     </div>
                   </div>

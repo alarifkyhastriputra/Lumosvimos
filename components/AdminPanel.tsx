@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { User, Announcement, SellerApplication, UserShop } from '../types.ts';
-import { ref, onValue, update, set, push, serverTimestamp } from 'firebase/database';
+import { ref, onValue, update, set, push, remove, get } from 'firebase/database';
 import { db } from '../firebase.ts';
 
 interface AdminPanelProps {
@@ -189,6 +189,63 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     } catch (err) {
       console.error('Error rejecting seller:', err);
       showToast('Gagal menolak pengajuan toko.', 'error');
+    }
+  };
+
+  // Permanently Delete Shop & Products & Revoke Seller Status (Admin)
+  const handleDeleteShopAndRevokeByAdmin = async (app: SellerApplication) => {
+    if (!window.confirm(`Hapus Toko "${app.shopName}" milik ${app.fullName} beserta seluruh produknya secara permanen?`)) return;
+
+    try {
+      // 1. Delete seller application
+      await remove(ref(db, `sellerApplications/${app.userId}`));
+
+      // 2. Find and delete shop
+      const shopSnap = await get(ref(db, 'shops'));
+      if (shopSnap.exists()) {
+        const shopsVal = shopSnap.val();
+        Object.entries(shopsVal).forEach(async ([shopId, shopData]: [string, any]) => {
+          if (shopData.ownerId === app.userId) {
+            await remove(ref(db, `shops/${shopId}`));
+          }
+        });
+      }
+
+      // 3. Find and delete shop items
+      const itemsSnap = await get(ref(db, 'shopItems'));
+      if (itemsSnap.exists()) {
+        const itemsVal = itemsSnap.val();
+        Object.entries(itemsVal).forEach(async ([itemId, itemData]: [string, any]) => {
+          if (itemData.ownerId === app.userId) {
+            await remove(ref(db, `shopItems/${itemId}`));
+          }
+        });
+      }
+
+      // 4. Update user record
+      await update(ref(db, `users/${app.userId}`), {
+        isVerifiedSeller: false,
+        sellerStatus: 'unsubmitted',
+        sellerApplicationId: null
+      });
+
+      // 5. Send notification to applicant
+      const notifRef = push(ref(db, `notifications/${app.userId}`));
+      await set(notifRef, {
+        id: notifRef.key,
+        senderId: 'admin_system',
+        senderName: 'Vimos Admin Team',
+        senderPhoto: 'https://api.dicebear.com/7.x/bottts/svg?seed=vimos_admin',
+        type: 'comment',
+        commentText: `⚠️ Toko Anda "${app.shopName}" beserta seluruh produknya telah dihapus oleh Admin Vimos. Status pedagang Anda telah dicabut.`,
+        timestamp: Date.now(),
+        read: false
+      });
+
+      showToast(`Toko "${app.shopName}" dan seluruh produknya berhasil dihapus.`, 'success');
+    } catch (err) {
+      console.error('Error deleting shop by admin:', err);
+      showToast('Gagal menghapus toko.', 'error');
     }
   };
 
@@ -565,18 +622,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                       )}
 
                       {isApproved && (
-                        <div className="flex items-center space-x-2">
-                          <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-3 py-1 rounded-xl border border-emerald-200">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-3 py-1.5 rounded-xl border border-emerald-200">
                             ✅ Toko Aktif & Terverifikasi
                           </span>
                           <button
-                            onClick={() => {
-                              setRejectingApp(app);
-                              setRejectionReasonInput('Izin toko dicabut oleh Admin karena pelanggaran ketentuan.');
-                            }}
-                            className="px-3 py-1.5 bg-neutral-100 hover:bg-red-50 text-neutral-600 hover:text-red-600 text-[10px] font-black rounded-xl uppercase transition-colors"
+                            onClick={() => handleDeleteShopAndRevokeByAdmin(app)}
+                            className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white text-[10px] font-black rounded-xl uppercase transition-all shadow-xs flex items-center space-x-1 cursor-pointer"
+                            title="Hapus Toko & Produk"
                           >
-                            Cabut Izin
+                            <i className="fas fa-trash-can text-[9px]"></i>
+                            <span>Hapus Toko & Produk</span>
                           </button>
                         </div>
                       )}
@@ -629,7 +685,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                   <div className="flex items-center justify-between">
                     <div className="flex items-center space-x-3 flex-1 min-w-0">
                       <img 
-                        src={user.photoURL} 
+                        src={user.photoURL || `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(user.name || 'User')}`} 
                         className={`w-12 h-12 rounded-full border-2 border-black object-cover cursor-pointer ${user.isBanned ? 'grayscale opacity-30' : ''}`}
                         onClick={() => onUserClick(user.id)}
                         alt={user.name}

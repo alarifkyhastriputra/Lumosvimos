@@ -1857,63 +1857,14 @@ const Chat: React.FC<ChatProps> = ({
                 /* CASE B: NOT SEARCHING -> SHOW ACTIVE CONVERSATIONS & MUTUAL FOLLOWERS */
                 <div className="space-y-3">
                   {mutualFollowers.length === 0 ? (
-                    <div className="space-y-4">
-                      <div className="text-center py-8 bg-neutral-50 rounded-3xl border border-neutral-200/80 p-5 space-y-2">
-                        <div className="w-12 h-12 rounded-full bg-neutral-200/70 text-neutral-600 flex items-center justify-center text-lg mx-auto shadow-inner">
-                          <i className="fas fa-users-rays"></i>
-                        </div>
-                        <h4 className="font-black text-xs uppercase text-neutral-900">Belum Ada Teman Saling Follow</h4>
-                        <p className="text-xs text-neutral-500 max-w-xs mx-auto leading-relaxed">
-                          Gunakan kolom pencarian di atas untuk mencari dan mengirim pesan ke siapa saja di Vimos!
-                        </p>
+                    <div className="text-center py-16 bg-neutral-50 rounded-3xl border border-neutral-200/80 p-6 space-y-2">
+                      <div className="w-12 h-12 rounded-full bg-neutral-200/70 text-neutral-600 flex items-center justify-center text-lg mx-auto shadow-inner">
+                        <i className="fas fa-users-rays"></i>
                       </div>
-
-                      {/* QUICK DISCOVER USERS */}
-                      {users.filter(u => u.id !== currentUser?.id).length > 0 && (
-                        <div className="space-y-2">
-                          <span className="text-[10px] font-black uppercase tracking-wider text-neutral-400 px-1">
-                            Rekomendasi Pengguna
-                          </span>
-                          <div className="space-y-2">
-                            {users.filter(u => u.id !== currentUser?.id).slice(0, 5).map(u => {
-                              const uOnline = isUserOnline(u.id);
-                              return (
-                                <div key={u.id} className="flex items-center border border-neutral-200/80 rounded-2xl hover:border-black transition-all p-3 bg-white shadow-2xs">
-                                  <div className="relative shrink-0 mr-3">
-                                    <img 
-                                      src={u.photoURL} 
-                                      className="w-10 h-10 rounded-full border border-neutral-200 bg-neutral-100 cursor-pointer object-cover" 
-                                      alt={u.name} 
-                                      onClick={() => onUserClick(u.id)}
-                                    />
-                                    {uOnline && (
-                                      <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-emerald-500 rounded-full border-2 border-white ring-1 ring-emerald-400"></span>
-                                    )}
-                                  </div>
-                                  <div className="flex-1 text-left min-w-0 mr-2">
-                                    <p 
-                                      onClick={() => onUserClick(u.id)}
-                                      className="font-extrabold text-xs uppercase text-neutral-900 truncate hover:underline cursor-pointer"
-                                    >
-                                      {u.name}
-                                    </p>
-                                    <p className="text-[10px] text-neutral-400 truncate">
-                                      {uOnline ? 'Online' : 'Offline'}
-                                    </p>
-                                  </div>
-                                  <button 
-                                    onClick={() => setSelectedRecipient({ type: 'user', data: u })}
-                                    className="px-3 py-1.5 bg-neutral-950 hover:bg-black text-white text-[10px] font-black uppercase rounded-xl transition-all shadow-xs active:scale-95 flex items-center space-x-1 shrink-0 cursor-pointer"
-                                  >
-                                    <i className="fas fa-message text-[9px] text-amber-400"></i>
-                                    <span>Pesan</span>
-                                  </button>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      )}
+                      <h4 className="font-black text-xs uppercase text-neutral-900">Belum Ada Teman Saling Follow</h4>
+                      <p className="text-xs text-neutral-500 max-w-xs mx-auto leading-relaxed">
+                        Gunakan kolom pencarian di atas untuk mencari dan mengirim pesan ke pengguna lain!
+                      </p>
                     </div>
                   ) : (
                     mutualFollowers.map(u => {

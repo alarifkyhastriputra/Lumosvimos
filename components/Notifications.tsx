@@ -107,7 +107,7 @@ export default function Notifications({
                 <div className="flex items-center gap-3.5 flex-1 min-w-0">
                   <div className="relative shrink-0">
                     <img 
-                      src={notif.senderPhoto} 
+                      src={notif.senderPhoto || `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(notif.senderName || 'User')}`} 
                       alt={notif.senderName} 
                       className="w-12 h-12 rounded-full border border-black/10 cursor-pointer object-cover shadow-xs"
                       onClick={(e) => {
@@ -147,7 +147,7 @@ export default function Notifications({
                     {isGroupInvite && (
                       <div className="mt-2 bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-200/80 rounded-xl p-2.5 flex items-center space-x-3">
                         {notif.groupPhoto ? (
-                          <img src={notif.groupPhoto} alt="Group" className="w-9 h-9 rounded-full object-cover border border-purple-300 shrink-0" />
+                          <img src={notif.groupPhoto || `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(notif.groupName || 'Group')}`} alt="Group" className="w-9 h-9 rounded-full object-cover border border-purple-300 shrink-0" />
                         ) : (
                           <div className="w-9 h-9 rounded-full bg-purple-600 text-white flex items-center justify-center text-xs font-black shrink-0 shadow-xs">
                             <i className="fas fa-users"></i>

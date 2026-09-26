@@ -5,6 +5,28 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>VIMOS - Social</title>
+  <script>
+    (function() {
+      var suppressError = function(msg) {
+        if (!msg) return false;
+        var s = String(msg).toLowerCase();
+        return s.indexOf('script error') > -1 || s.indexOf('profitableratecpmnetwork') > -1 || s.indexOf('invoke.js') > -1;
+      };
+      window.onerror = function(msg, url, line, col, error) {
+        if (suppressError(msg) || suppressError(url)) {
+          return true;
+        }
+        return false;
+      };
+      window.addEventListener('unhandledrejection', function(event) {
+        var reason = event && event.reason ? (event.reason.message || event.reason) : '';
+        if (suppressError(reason)) {
+          if (event.preventDefault) event.preventDefault();
+          if (event.stopPropagation) event.stopPropagation();
+        }
+      }, true);
+    })();
+  </script>
   <link rel="preconnect" href="https://www.youtube-nocookie.com" crossorigin>
   <link rel="preconnect" href="https://www.youtube.com" crossorigin>
   <link rel="preconnect" href="https://i.ytimg.com" crossorigin>

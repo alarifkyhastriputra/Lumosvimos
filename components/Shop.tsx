@@ -5,6 +5,32 @@ import { ref, onValue, push, set, update, remove, serverTimestamp, get, query, l
 import { db } from '../firebase.ts';
 import { compressImage } from '../services/imageCompressor.ts';
 
+// High-performance persistent memory cache for instant, 0-latency Shop loading
+let memShops: UserShop[] | null = null;
+let memItems: ShopItem[] | null = null;
+let memOrders: ShopOrder[] | null = null;
+let memMyApp: SellerApplication | null = null;
+
+const CACHE_KEY_SHOPS = 'vimos_shop_cache_shops_v1';
+const CACHE_KEY_ITEMS = 'vimos_shop_cache_items_v1';
+const CACHE_KEY_ORDERS = 'vimos_shop_cache_orders_v1';
+const CACHE_KEY_APP = 'vimos_shop_cache_app_v1';
+
+const getLocalCache = <T,>(key: string): T | null => {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+};
+
+const setLocalCache = (key: string, data: any) => {
+  try {
+    localStorage.setItem(key, JSON.stringify(data));
+  } catch {}
+};
+
 export const SHOP_ITEMS: any[] = [];
 
 interface ShopProps {
@@ -16,14 +42,19 @@ interface ShopProps {
 export const Shop: React.FC<ShopProps> = ({ currentUser, onUpdateUser, onNavigateToChat }) => {
   const { t } = useLanguage();
   
-  // Realtime Data from Firebase
-  const [shops, setShops] = useState<UserShop[]>([]);
-  const [items, setItems] = useState<ShopItem[]>([]);
-  const [orders, setOrders] = useState<ShopOrder[]>([]);
-  const [loadingData, setLoadingData] = useState(true);
+  const initialShops = memShops || getLocalCache<UserShop[]>(CACHE_KEY_SHOPS) || [];
+  const initialItems = memItems || getLocalCache<ShopItem[]>(CACHE_KEY_ITEMS) || [];
+  const initialOrders = memOrders || getLocalCache<ShopOrder[]>(CACHE_KEY_ORDERS) || [];
+  const initialApp = memMyApp || getLocalCache<SellerApplication>(CACHE_KEY_APP) || null;
+
+  // Realtime Data from Firebase with instant cache hydration
+  const [shops, setShops] = useState<UserShop[]>(initialShops);
+  const [items, setItems] = useState<ShopItem[]>(initialItems);
+  const [orders, setOrders] = useState<ShopOrder[]>(initialOrders);
+  const [loadingData, setLoadingData] = useState<boolean>(initialItems.length === 0 && initialShops.length === 0);
 
   // User's KYC Seller Application state
-  const [myApplication, setMyApplication] = useState<SellerApplication | null>(null);
+  const [myApplication, setMyApplication] = useState<SellerApplication | null>(initialApp);
 
   // Active Navigation
   const [activeTab, setActiveTab] = useState<'explore' | 'my_shop' | 'orders'>('explore');
@@ -113,7 +144,7 @@ export const Shop: React.FC<ShopProps> = ({ currentUser, onUpdateUser, onNavigat
 
     setCompressing(true);
     try {
-      const compressed = await compressImage(file, 1200, 1200, 0.85);
+      const compressed = await compressImage(file, 800, 800, 0.76);
       callback(compressed);
       showToast('Foto berhasil diproses & diunggah!', 'success');
     } catch (err) {
@@ -132,59 +163,12 @@ export const Shop: React.FC<ShopProps> = ({ currentUser, onUpdateUser, onNavigat
     }
   };
 
-  // Subscribe to Shops, Items, Orders, and Seller KYC Application from Firebase
+  // Subscribe to Shops, Items, Orders, and Seller KYC Application from Firebase with seamless cache sync
   useEffect(() => {
     const shopsRef = ref(db, 'shops');
     const itemsRef = ref(db, 'shopItems');
     const ordersRef = query(ref(db, 'shopOrders'), limitToLast(120));
     const myAppRef = ref(db, `sellerApplications/${currentUser.id}`);
-
-    // Fast direct fetches for instantaneous load speeds
-    get(shopsRef).then((snapshot) => {
-      const data = snapshot.val();
-      if (data) {
-        const list: UserShop[] = Object.entries(data).map(([id, val]: [string, any]) => ({
-          id,
-          ...val
-        }));
-        setShops(list.sort((a, b) => b.createdAt - a.createdAt));
-      }
-    }).catch(() => {});
-
-    get(itemsRef).then((snapshot) => {
-      const data = snapshot.val();
-      if (data) {
-        const list: ShopItem[] = Object.entries(data).map(([id, val]: [string, any]) => ({
-          id,
-          ...val
-        }));
-        setItems(list.sort((a, b) => b.createdAt - a.createdAt));
-      }
-      setLoadingData(false);
-    }).catch(() => {
-      setLoadingData(false);
-    });
-
-    get(ordersRef).then((snapshot) => {
-      const data = snapshot.val();
-      if (data) {
-        const list: ShopOrder[] = Object.entries(data).map(([id, val]: [string, any]) => ({
-          id,
-          ...val
-        }));
-        setOrders(list.sort((a, b) => b.timestamp - a.timestamp));
-      }
-    }).catch(() => {});
-
-    get(myAppRef).then((snapshot) => {
-      const data = snapshot.val();
-      if (data) {
-        setMyApplication(data as SellerApplication);
-        if (data.status === 'approved' && !currentUser.isVerifiedSeller) {
-          onUpdateUser({ isVerifiedSeller: true, sellerStatus: 'approved' });
-        }
-      }
-    }).catch(() => {});
 
     const unsubShops = onValue(shopsRef, (snapshot) => {
       const data = snapshot.val();
@@ -192,9 +176,12 @@ export const Shop: React.FC<ShopProps> = ({ currentUser, onUpdateUser, onNavigat
         const list: UserShop[] = Object.entries(data).map(([id, val]: [string, any]) => ({
           id,
           ...val
-        }));
-        setShops(list.sort((a, b) => b.createdAt - a.createdAt));
+        })).sort((a, b) => b.createdAt - a.createdAt);
+        memShops = list;
+        setShops(list);
+        setLocalCache(CACHE_KEY_SHOPS, list);
       } else {
+        memShops = [];
         setShops([]);
       }
     }, (error) => console.warn('Shops listener error:', error));
@@ -205,9 +192,12 @@ export const Shop: React.FC<ShopProps> = ({ currentUser, onUpdateUser, onNavigat
         const list: ShopItem[] = Object.entries(data).map(([id, val]: [string, any]) => ({
           id,
           ...val
-        }));
-        setItems(list.sort((a, b) => b.createdAt - a.createdAt));
+        })).sort((a, b) => b.createdAt - a.createdAt);
+        memItems = list;
+        setItems(list);
+        setLocalCache(CACHE_KEY_ITEMS, list);
       } else {
+        memItems = [];
         setItems([]);
       }
       setLoadingData(false);
@@ -222,9 +212,12 @@ export const Shop: React.FC<ShopProps> = ({ currentUser, onUpdateUser, onNavigat
         const list: ShopOrder[] = Object.entries(data).map(([id, val]: [string, any]) => ({
           id,
           ...val
-        }));
-        setOrders(list.sort((a, b) => b.timestamp - a.timestamp));
+        })).sort((a, b) => b.timestamp - a.timestamp);
+        memOrders = list;
+        setOrders(list);
+        setLocalCache(CACHE_KEY_ORDERS, list);
       } else {
+        memOrders = [];
         setOrders([]);
       }
     }, (error) => console.warn('Orders listener error:', error));
@@ -232,11 +225,14 @@ export const Shop: React.FC<ShopProps> = ({ currentUser, onUpdateUser, onNavigat
     const unsubMyApp = onValue(myAppRef, (snapshot) => {
       const data = snapshot.val();
       if (data) {
+        memMyApp = data as SellerApplication;
         setMyApplication(data as SellerApplication);
+        setLocalCache(CACHE_KEY_APP, data);
         if (data.status === 'approved' && !currentUser.isVerifiedSeller) {
           onUpdateUser({ isVerifiedSeller: true, sellerStatus: 'approved' });
         }
       } else {
+        memMyApp = null;
         setMyApplication(null);
       }
     });
@@ -939,9 +935,17 @@ export const Shop: React.FC<ShopProps> = ({ currentUser, onUpdateUser, onNavigat
             {exploreSubTab === 'items' && (
               <div>
                 {loadingData ? (
-                  <div className="py-20 text-center text-neutral-400 text-xs font-bold space-y-2">
-                    <i className="fas fa-spinner fa-spin text-2xl text-black"></i>
-                    <p>Memuat etalase pasar...</p>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 sm:gap-4 animate-pulse">
+                    {[1, 2, 3, 4, 5, 6].map((i) => (
+                      <div key={i} className="bg-white rounded-3xl overflow-hidden border border-neutral-200/80 p-3 flex flex-col space-y-3 shadow-xs">
+                        <div className="aspect-square bg-neutral-100 rounded-2xl w-full"></div>
+                        <div className="space-y-1.5 px-0.5">
+                          <div className="h-3 bg-neutral-100 rounded-md w-3/4"></div>
+                          <div className="h-2.5 bg-neutral-100 rounded-md w-1/2"></div>
+                        </div>
+                        <div className="h-4 bg-neutral-200 rounded-lg w-2/3 mt-2"></div>
+                      </div>
+                    ))}
                   </div>
                 ) : filteredItems.length === 0 ? (
                   <div className="bg-white rounded-3xl border border-neutral-200 p-10 text-center space-y-3 my-4 shadow-xs">

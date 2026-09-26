@@ -11,7 +11,6 @@ import Profile from './components/Profile.tsx';
 import Notifications from './components/Notifications.tsx';
 import Reels from './components/Reels.tsx';
 import AuthScreen from './components/AuthScreen.tsx';
-import RequireGoogleLinkScreen from './components/RequireGoogleLinkScreen.tsx';
 import AdminPanel from './components/AdminPanel.tsx';
 import Shop from './components/Shop.tsx';
 import SinglePostView from './components/SinglePostView.tsx';
@@ -113,6 +112,20 @@ export default function App() {
   const [isExitConfirmOpen, setIsExitConfirmOpen] = useState(false);
   const [isAppExited, setIsAppExited] = useState(false);
 
+  // Active Chat Subview / Conversation State (Hides bottom Navbar & top Header when chatting)
+  const [isChatConversationActive, setIsChatConversationActive] = useState<boolean>(false);
+  const isChatConversationActiveRef = useRef<boolean>(false);
+  useEffect(() => { isChatConversationActiveRef.current = isChatConversationActive; }, [isChatConversationActive]);
+  const chatBackHandlerRef = useRef<(() => boolean) | null>(null);
+
+  // Shop Keep-Alive state for instant 0ms transitions
+  const [hasVisitedShop, setHasVisitedShop] = useState<boolean>(false);
+  useEffect(() => {
+    if (currentView === View.SHOP && !hasVisitedShop) {
+      setHasVisitedShop(true);
+    }
+  }, [currentView, hasVisitedShop]);
+
   const currentViewRef = useRef<View>(currentView);
   useEffect(() => { currentViewRef.current = currentView; }, [currentView]);
 
@@ -153,7 +166,6 @@ export default function App() {
       if (user) {
         const isMasterEmailAdmin = isEmailAdmin(user.email);
         const fallbackAccountName = user.displayName || (user.email ? user.email.split('@')[0] : 'Member');
-        const isGoogleAccount = user.providerData?.some(p => p.providerId === 'google.com') || false;
         
         // Optimistically set currentUser to avoid loading screen
         setCurrentUser(prev => {
@@ -167,8 +179,7 @@ export default function App() {
             following: [],
             recentCaptures: [],
             totalLikes: 0,
-            isAdmin: isMasterEmailAdmin,
-            isGoogleLinked: isGoogleAccount
+            isAdmin: isMasterEmailAdmin
           };
           try { localStorage.setItem('vimos_user', JSON.stringify(updated)); } catch {}
           return updated;
@@ -199,13 +210,9 @@ export default function App() {
               update(userRef, { isAdmin: true });
             }
 
-            // Synchronize Google account displayName & photoURL into user record if logged in via Google/Gmail
-            const googleDisplayName = user.displayName?.trim();
-            const cleanName = (isGoogleAccount && googleDisplayName) 
-              ? googleDisplayName 
-              : ((!data.name || data.name === 'Anonymous Shadow' || data.name === 'Anonymous Orbit' || data.name === 'Anonymous' || data.name === 'Member') 
-                  ? fallbackAccountName 
-                  : data.name);
+            const cleanName = (!data.name || data.name === 'Anonymous Shadow' || data.name === 'Anonymous Orbit' || data.name === 'Anonymous' || data.name === 'Member') 
+              ? fallbackAccountName 
+              : data.name;
 
             if (cleanName !== data.name) {
               update(userRef, { name: cleanName });
@@ -218,8 +225,6 @@ export default function App() {
             const activeUserData = { 
               id: user.uid, 
               ...data,
-              isGoogleLinked: isGoogleAccount || Boolean(data.isGoogleLinked),
-              googleEmail: data.googleEmail || (isGoogleAccount ? user.email : undefined),
               name: cleanName,
               isAdmin: effectiveIsAdmin,
               followers: data.followers ? Object.keys(data.followers) : [],
@@ -238,8 +243,7 @@ export default function App() {
               following: {},
               recentCaptures: {},
               totalLikes: 0,
-              isAdmin: isMasterEmailAdmin,
-              isGoogleLinked: isGoogleAccount
+              isAdmin: isMasterEmailAdmin
             };
             set(userRef, newUser);
             const formattedUser = {
@@ -455,6 +459,14 @@ export default function App() {
     } catch {}
 
     const handlePopState = () => {
+      // 0. If in active chat conversation or subview, hardware Back button returns to chat inbox first
+      if (currentViewRef.current === View.CHAT && isChatConversationActiveRef.current) {
+        if (chatBackHandlerRef.current && chatBackHandlerRef.current()) {
+          try { window.history.pushState({ orbit_app: true, layer: 1 }, ''); } catch {}
+          return;
+        }
+      }
+
       // 1. If Exit Confirmation Modal is already showing, pressing back closes the modal
       if (isExitConfirmOpenRef.current) {
         setIsExitConfirmOpen(false);
@@ -841,9 +853,9 @@ export default function App() {
   useEffect(() => {
     if (!currentUser) return;
 
-    // 1. Listen to Direct Chats & Shop Chats (limited to recent active chats)
-    const chatsQuery = query(ref(db, 'chats'), limitToLast(20));
-    const unsubscribeChats = onValue(chatsQuery, (snapshot) => {
+    // 1. Listen to Direct Chats & Shop Chats for current user
+    const chatsRef = ref(db, 'chats');
+    const unsubscribeChats = onValue(chatsRef, (snapshot) => {
       const data = snapshot.val();
       if (!data) return;
 
@@ -886,9 +898,9 @@ export default function App() {
       });
     });
 
-    // 2. Listen to Collectives / Groups (limited to recent active groups)
-    const groupsQuery = query(ref(db, 'groups'), limitToLast(20));
-    const unsubscribeGroups = onValue(groupsQuery, (snapshot) => {
+    // 2. Listen to Collectives / Groups for current user
+    const groupsRef = ref(db, 'groups');
+    const unsubscribeGroups = onValue(groupsRef, (snapshot) => {
       const data = snapshot.val();
       if (!data) return;
 
@@ -1640,81 +1652,58 @@ export default function App() {
 
   if (!currentUser) return <AuthScreen bannedMessage={bannedMessage} />;
 
-  // Enforce mandatory Google account linking to access Vimos web features
-  const isGoogleLinked = Boolean(
-    currentUser.isGoogleLinked ||
-    auth.currentUser?.providerData?.some(p => p.providerId === 'google.com')
-  );
-
-  if (!isGoogleLinked) {
-    return (
-      <RequireGoogleLinkScreen 
-        currentUser={currentUser}
-        onLinked={(googleInfo) => {
-          setCurrentUser(prev => prev ? {
-            ...prev,
-            isGoogleLinked: true,
-            googleEmail: googleInfo.email || prev.email,
-            googleDisplayName: googleInfo.displayName || prev.name,
-            googlePhotoURL: googleInfo.photoURL || prev.photoURL,
-          } : null);
-        }}
-        onLogout={() => {
-          signOut(auth);
-          try { localStorage.removeItem('vimos_user'); } catch {}
-          setCurrentUser(null);
-        }}
-      />
-    );
-  }
+  const shouldHideHeader = currentView === View.CHAT && isChatConversationActive;
+  const shouldHideNavbar = currentView === View.CHAT && isChatConversationActive;
 
   return (
     <div className="flex flex-col min-h-screen bg-white max-w-xl mx-auto border-x border-gray-100 shadow-sm relative overflow-hidden">
-      <Header 
-        onSearch={setSearchTerm} 
-        users={usersWithPresence} 
-        onUserClick={(id) => { 
-          setSelectedPostId(null);
-          try {
-            const url = new URL(window.location.href);
-            url.searchParams.delete('post');
-            window.history.pushState({}, '', url.toString());
-          } catch {}
-          setSelectedProfileId(id); 
-          setCurrentView(View.PROFILE); 
-        }} 
-        onLeaderboardClick={() => {
-          setSelectedPostId(null);
-          try {
-            const url = new URL(window.location.href);
-            url.searchParams.delete('post');
-            window.history.pushState({}, '', url.toString());
-          } catch {}
-          setCurrentView(View.LEADERBOARD);
-        }}
-        onShopClick={() => {
-          setSelectedPostId(null);
-          try {
-            const url = new URL(window.location.href);
-            url.searchParams.delete('post');
-            window.history.pushState({}, '', url.toString());
-          } catch {}
-          setCurrentView(View.SHOP);
-        }}
-        userCoins={currentUser.coins ?? 500}
-        isAdmin={currentUser.isAdmin}
-        onAdminClick={() => {
-          setSelectedPostId(null);
-          try {
-            const url = new URL(window.location.href);
-            url.searchParams.delete('post');
-            window.history.pushState({}, '', url.toString());
-          } catch {}
-          setCurrentView(View.ADMIN);
-        }}
-      />
+      {!shouldHideHeader && (
+        <Header 
+          onSearch={setSearchTerm} 
+          users={usersWithPresence} 
+          onUserClick={(id) => { 
+            setSelectedPostId(null);
+            try {
+              const url = new URL(window.location.href);
+              url.searchParams.delete('post');
+              window.history.pushState({}, '', url.toString());
+            } catch {}
+            setSelectedProfileId(id); 
+            setCurrentView(View.PROFILE); 
+          }} 
+          onLeaderboardClick={() => {
+            setSelectedPostId(null);
+            try {
+              const url = new URL(window.location.href);
+              url.searchParams.delete('post');
+              window.history.pushState({}, '', url.toString());
+            } catch {}
+            setCurrentView(View.LEADERBOARD);
+          }}
+          onShopClick={() => {
+            setSelectedPostId(null);
+            try {
+              const url = new URL(window.location.href);
+              url.searchParams.delete('post');
+              window.history.pushState({}, '', url.toString());
+            } catch {}
+            setCurrentView(View.SHOP);
+          }}
+          userCoins={currentUser.coins ?? 500}
+          isAdmin={currentUser.isAdmin}
+          onAdminClick={() => {
+            setSelectedPostId(null);
+            try {
+              const url = new URL(window.location.href);
+              url.searchParams.delete('post');
+              window.history.pushState({}, '', url.toString());
+            } catch {}
+            setCurrentView(View.ADMIN);
+          }}
+        />
+      )}
 
-      <main className="flex-1 pb-24 overflow-y-auto scroll-smooth">
+      <main className={shouldHideNavbar ? "flex-1 overflow-hidden h-[100dvh] flex flex-col" : "flex-1 pb-24 overflow-y-auto scroll-smooth"}>
         {selectedPostId ? (
           <SinglePostView
             postId={selectedPostId}
@@ -1834,6 +1823,8 @@ export default function App() {
             }}
             permissionStatus={notifPermission}
             onRequestPermission={requestNotifPermission}
+            onActiveConversationChange={setIsChatConversationActive}
+            onBackToChatListRef={chatBackHandlerRef}
           />
         )}
         {currentView === View.PROFILE && (
@@ -1864,6 +1855,10 @@ export default function App() {
               }}
               onUserClick={(id) => { setSelectedProfileId(id); setCurrentView(View.PROFILE); }}
               onLogout={handleLogout}
+              onNavigateToChat={(id) => {
+                setTargetChatUserId(id);
+                setCurrentView(View.CHAT);
+              }}
               onBanUser={(id) => {
                 const user = users.find(u => u.id === id);
                 update(ref(db, `users/${id}`), { isBanned: !user?.isBanned });
@@ -1892,18 +1887,20 @@ export default function App() {
             </div>
           )
         )}
-        {currentView === View.SHOP && (
-          <Shop 
-            currentUser={currentUser}
-            onUpdateUser={(updatedData) => {
-              setCurrentUser(prev => prev ? { ...prev, ...updatedData } : null);
-            }}
-            onNavigateToChat={(targetUserId, initialMessage) => {
-              setTargetChatUserId(targetUserId);
-              setInitialChatMessage(initialMessage || null);
-              setCurrentView(View.CHAT);
-            }}
-          />
+        {(currentView === View.SHOP || hasVisitedShop) && (
+          <div className={currentView === View.SHOP ? 'block' : 'hidden'}>
+            <Shop 
+              currentUser={currentUser}
+              onUpdateUser={(updatedData) => {
+                setCurrentUser(prev => prev ? { ...prev, ...updatedData } : null);
+              }}
+              onNavigateToChat={(targetUserId, initialMessage) => {
+                setTargetChatUserId(targetUserId);
+                setInitialChatMessage(initialMessage || null);
+                setCurrentView(View.CHAT);
+              }}
+            />
+          </div>
         )}
         {currentView === View.ADMIN && currentUser.isAdmin && (
           <AdminPanel 
@@ -1923,23 +1920,26 @@ export default function App() {
         )}
       </main>
 
-      <Navbar 
-        activeView={selectedPostId ? '' : currentView} 
-        onViewChange={(view) => {
-          setSelectedPostId(null);
-          try {
-            const url = new URL(window.location.href);
-            url.searchParams.delete('post');
-            window.history.pushState({}, '', url.toString());
-          } catch {}
-          if (view === View.PROFILE) {
-            setSelectedProfileId(currentUser?.id || null);
-          }
-          setCurrentView(view);
-          setSearchTerm('');
-        }} 
-        unreadCount={notifications.filter(n => !n.read).length}
-      />
+      {!shouldHideNavbar && (
+        <Navbar 
+          activeView={selectedPostId ? '' : currentView} 
+          onViewChange={(view) => {
+            setIsChatConversationActive(false);
+            setSelectedPostId(null);
+            try {
+              const url = new URL(window.location.href);
+              url.searchParams.delete('post');
+              window.history.pushState({}, '', url.toString());
+            } catch {}
+            if (view === View.PROFILE) {
+              setSelectedProfileId(currentUser?.id || null);
+            }
+            setCurrentView(view);
+            setSearchTerm('');
+          }} 
+          unreadCount={notifications.filter(n => !n.read).length}
+        />
+      )}
 
       {currentCall && currentUser && (
         <CallingOverlay

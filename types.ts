@@ -24,11 +24,6 @@ export interface User {
   inventory?: string[]; // Array of purchased item IDs
   equippedFrame?: string; // Equipped avatar frame ID
   equippedBadge?: string; // Equipped badge icon/title
-  isGoogleLinked?: boolean; // Required to access Vimos web features
-  googleEmail?: string;
-  googleDisplayName?: string;
-  googlePhotoURL?: string;
-  googleLinkedAt?: number;
   isVerifiedSeller?: boolean; // Approved merchant status
   sellerStatus?: 'unregistered' | 'pending' | 'approved' | 'rejected';
   sellerApplicationId?: string;

@@ -21,6 +21,8 @@ interface ChatProps {
   onClearInitialChat?: () => void;
   permissionStatus?: NotificationPermission | 'unsupported';
   onRequestPermission?: () => void;
+  onActiveConversationChange?: (isActive: boolean) => void;
+  onBackToChatListRef?: React.MutableRefObject<(() => boolean) | null>;
 }
 
 const Chat: React.FC<ChatProps> = ({ 
@@ -37,7 +39,9 @@ const Chat: React.FC<ChatProps> = ({
   initialChatMessage,
   onClearInitialChat,
   permissionStatus,
-  onRequestPermission
+  onRequestPermission,
+  onActiveConversationChange,
+  onBackToChatListRef
 }) => {
   const { t } = useLanguage();
   const [liveStatuses, setLiveStatuses] = useState<Record<string, { state: 'online' | 'offline'; last_changed?: number }>>(userStatuses || {});
@@ -103,6 +107,9 @@ const Chat: React.FC<ChatProps> = ({
   // Fullscreen view toggle state - defaults to true so chat and group chat are immersive edge-to-edge full screen
   const [isFullScreen, setIsFullScreen] = useState(true);
 
+  // Cache for user profiles fetched directly by UID
+  const [fetchedUsersMap, setFetchedUsersMap] = useState<Record<string, User>>({});
+
   // Custom Confirmation Modal Pop-Up State
   const [confirmModal, setConfirmModal] = useState<{
     isOpen: boolean;
@@ -112,15 +119,21 @@ const Chat: React.FC<ChatProps> = ({
     confirmText?: string;
   } | null>(null);
 
-  // Shop Chat Threads state
-  interface ShopChatThread {
+  // Chat Conversation Thread Interface
+  interface ChatThread {
     chatId: string;
     otherUser: User;
     lastMessage: string;
     lastMessageSenderId: string;
     timestamp: number;
+    unreadCount: number;
+    isShop?: boolean;
+    mediaSummary?: string;
   }
-  const [shopChatThreads, setShopChatThreads] = useState<ShopChatThread[]>([]);
+  const [directChatThreads, setDirectChatThreads] = useState<ChatThread[]>([]);
+  const [shopChatThreads, setShopChatThreads] = useState<ChatThread[]>([]);
+  const [loadingThreads, setLoadingThreads] = useState<boolean>(true);
+  const [isLoadingMessages, setIsLoadingMessages] = useState<boolean>(false);
 
   // Anonymous Chat States
   const [isSearchingAnon, setIsSearchingAnon] = useState(false);
@@ -147,6 +160,50 @@ const Chat: React.FC<ChatProps> = ({
     senderName?: string;
     timestamp?: number;
   } | null>(null);
+
+  // Track if any active subscreen / conversation is open to hide navbar & header
+  const isAnySubscreenOpen = Boolean(
+    selectedRecipient || isCreatingGroup || isViewingGroupSettings || (activeAnonRoomId && activeAnonRoom)
+  );
+
+  useEffect(() => {
+    if (onActiveConversationChange) {
+      onActiveConversationChange(isAnySubscreenOpen);
+    }
+  }, [isAnySubscreenOpen, onActiveConversationChange]);
+
+  // Wire up back button handler so pressing Android back button closes active conversation back to chat list
+  useEffect(() => {
+    if (onBackToChatListRef) {
+      onBackToChatListRef.current = () => {
+        if (confirmModal) {
+          setConfirmModal(null);
+          return true;
+        }
+        if (fullscreenMedia) {
+          setFullscreenMedia(null);
+          return true;
+        }
+        if (isViewingGroupSettings) {
+          setIsViewingGroupSettings(false);
+          return true;
+        }
+        if (isCreatingGroup) {
+          setIsCreatingGroup(false);
+          return true;
+        }
+        if (activeAnonRoomId) {
+          handleLeaveAnonRoom();
+          return true;
+        }
+        if (selectedRecipient) {
+          setSelectedRecipient(null);
+          return true;
+        }
+        return false;
+      };
+    }
+  });
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
@@ -325,8 +382,9 @@ const Chat: React.FC<ChatProps> = ({
     const targetUser = users.find(u => u.id === uid);
     const targetFollowers = targetUser ? (targetUser.followers || []) : [];
     
-    const iFollowThem = following.includes(uid);
-    const theyFollowMe = followers.includes(uid) || targetFollowers.includes(currentUser.id);
+    const iFollowThem = Array.isArray(following) ? following.includes(uid) : Boolean((following as any)?.[uid]);
+    const theyFollowMe = (Array.isArray(followers) ? followers.includes(uid) : Boolean((followers as any)?.[uid])) || 
+                         (Array.isArray(targetFollowers) ? targetFollowers.includes(currentUser.id) : Boolean((targetFollowers as any)?.[currentUser.id]));
     return iFollowThem && theyFollowMe;
   };
 
@@ -340,26 +398,69 @@ const Chat: React.FC<ChatProps> = ({
     const targetFollowing = targetUser ? (targetUser.following || []) : [];
     const targetFollowers = targetUser ? (targetUser.followers || []) : [];
 
-    const iFollowThem = following.includes(uid);
-    const theyFollowMe = followers.includes(uid) || targetFollowers.includes(currentUser.id) || targetFollowing.includes(currentUser.id);
+    const iFollowThem = Array.isArray(following) ? following.includes(uid) : Boolean((following as any)?.[uid]);
+    const theyFollowMe = (Array.isArray(followers) ? followers.includes(uid) : Boolean((followers as any)?.[uid])) || 
+                         (Array.isArray(targetFollowers) ? targetFollowers.includes(currentUser.id) : Boolean((targetFollowers as any)?.[currentUser.id])) ||
+                         (Array.isArray(targetFollowing) ? targetFollowing.includes(currentUser.id) : Boolean((targetFollowing as any)?.[currentUser.id]));
     return iFollowThem || theyFollowMe;
   };
 
   const mutualFollowers = users.filter(u => u.id !== currentUser?.id && isMutual(u.id));
 
-  // Target User Auto-Selection for Jual Beli / Direct Chat
+  // Format timestamp nicely for chat threads
+  const formatChatTimestamp = (timestamp: number) => {
+    if (!timestamp) return '';
+    const date = new Date(timestamp);
+    const now = new Date();
+    const isToday = now.toDateString() === date.toDateString();
+    if (isToday) {
+      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    if (yesterday.toDateString() === date.toDateString()) {
+      return 'Kemarin';
+    }
+    return date.toLocaleDateString([], { day: 'numeric', month: 'short' });
+  };
+
+  // Target User Auto-Selection with instant RTDB fallback
   useEffect(() => {
-    if (targetUserId && users.length > 0) {
+    if (targetUserId) {
       const targetUser = users.find(u => u.id === targetUserId);
       if (targetUser) {
         setSelectedRecipient({ type: 'user', data: targetUser });
-        setActiveTab('shop');
         if (initialChatMessage) {
           setMsg(initialChatMessage);
         }
         if (onClearInitialChat) {
           onClearInitialChat();
         }
+      } else {
+        // Fetch user directly from RTDB if users list is still loading
+        get(ref(db, `users/${targetUserId}`)).then((snap) => {
+          if (snap.exists()) {
+            const val = snap.val();
+            const fallbackUser: User = {
+              id: targetUserId,
+              name: val.name || 'Pengguna Vimos',
+              email: val.email || '',
+              bio: val.bio || '',
+              photoURL: val.photoURL || `https://api.dicebear.com/7.x/initials/svg?seed=${targetUserId}&backgroundColor=000000`,
+              followers: val.followers ? Object.keys(val.followers) : [],
+              following: val.following ? Object.keys(val.following) : [],
+              recentCaptures: [],
+              totalLikes: val.totalLikes || 0
+            };
+            setSelectedRecipient({ type: 'user', data: fallbackUser });
+            if (initialChatMessage) {
+              setMsg(initialChatMessage);
+            }
+            if (onClearInitialChat) {
+              onClearInitialChat();
+            }
+          }
+        }).catch(() => {});
       }
     }
   }, [targetUserId, users, initialChatMessage]);
@@ -374,6 +475,22 @@ const Chat: React.FC<ChatProps> = ({
         if (onClearInitialChat) {
           onClearInitialChat();
         }
+      } else {
+        get(ref(db, `groups/${targetGroupId}`)).then((snap) => {
+          if (snap.exists()) {
+            const val = snap.val();
+            const gObj: Group = {
+              id: targetGroupId,
+              ...val,
+              participants: val.participants ? Object.keys(val.participants) : [],
+              admins: val.admins ? Object.keys(val.admins) : [],
+              pendingInvites: val.pendingInvites || {}
+            };
+            setSelectedRecipient({ type: 'group', data: gObj });
+            setActiveTab('groups');
+            if (onClearInitialChat) onClearInitialChat();
+          }
+        }).catch(() => {});
       }
     }
   }, [targetGroupId, groups]);
@@ -393,7 +510,12 @@ const Chat: React.FC<ChatProps> = ({
             admins: val.admins ? Object.keys(val.admins) : [],
             pendingInvites: val.pendingInvites || {}
           }))
-          .filter((g: Group) => g.participants.includes(currentUser.id));
+          .filter((g: Group) => g.participants.includes(currentUser.id))
+          .sort((a: any, b: any) => {
+            const timeA = Math.max(Number(a.lastTimestamp) || 0, Number(a.timestamp) || 0);
+            const timeB = Math.max(Number(b.lastTimestamp) || 0, Number(b.timestamp) || 0);
+            return timeB - timeA;
+          });
         setGroups(userGroups);
         
         if (selectedRecipient?.type === 'group') {
@@ -413,131 +535,213 @@ const Chat: React.FC<ChatProps> = ({
 
   const isMsgDeletedForUser = (deletedForObj: any, uid?: string) => {
     if (!deletedForObj || !uid) return false;
+    if (typeof deletedForObj !== 'object') return false;
     const safeId = getSafeKey(uid);
     return Boolean(deletedForObj[uid] || deletedForObj[safeId]);
   };
 
   const getTimestampNum = (ts: any): number => {
-    if (!ts) return Date.now();
+    if (!ts) return 0;
     if (typeof ts === 'number') return ts;
-    if (typeof ts === 'object' && ts !== null) return Date.now();
-    return Number(ts) || Date.now();
+    if (typeof ts === 'string') {
+      const parsed = Number(ts);
+      if (!isNaN(parsed) && parsed > 0) return parsed;
+      const d = Date.parse(ts);
+      if (!isNaN(d) && d > 0) return d;
+      return 0;
+    }
+    if (typeof ts === 'object' && ts !== null) {
+      // serverTimestamp placeholder on optimistic write
+      return Date.now();
+    }
+    return 0;
   };
 
-  // Sync active Shop Chats from Firebase RTDB with high-speed query constraints
+  // Sync active Direct Chats and Shop Chats from Firebase RTDB (Full sync without arbitrary limit)
   useEffect(() => {
     if (!currentUser) return;
 
-    const chatsRef = query(ref(db, 'chats'), limitToLast(60));
+    const chatsRef = ref(db, 'chats');
+    const safeUserId = getSafeKey(currentUser.id);
 
-    // Fast direct fetch for immediate first paint of active shop chats
-    get(chatsRef).then((snapshot) => {
-      const data = snapshot.val();
-      if (data && users.length > 0) {
-        const threads: ShopChatThread[] = [];
-        Object.entries(data).forEach(([chatId, chatVal]: [string, any]) => {
-          if (!chatId.includes(currentUser.id)) return;
+    const parseChatsSnapshot = (data: any) => {
+      if (!data) {
+        setDirectChatThreads([]);
+        setShopChatThreads([]);
+        setLoadingThreads(false);
+        return;
+      }
+
+      const directThreads: ChatThread[] = [];
+      const shopThreads: ChatThread[] = [];
+
+      Object.entries(data).forEach(([chatId, chatVal]: [string, any]) => {
+        if (!chatId.includes(currentUser.id)) return;
+        
+        let otherUserId = '';
+        if (chatId.startsWith(currentUser.id + '_')) {
+          otherUserId = chatId.slice(currentUser.id.length + 1);
+        } else if (chatId.endsWith('_' + currentUser.id)) {
+          otherUserId = chatId.slice(0, -(currentUser.id.length + 1));
+        } else {
           const parts = chatId.split('_');
-          if (parts.length !== 2) return;
-          const otherUserId = parts.find(id => id !== currentUser.id);
-          if (!otherUserId) return;
-          const otherUser = users.find(u => u.id === otherUserId);
-          if (!otherUser) return;
-          const messagesObj = chatVal?.messages;
-          if (!messagesObj) return;
-          const msgList = Object.entries(messagesObj)
+          otherUserId = parts.find(id => id !== currentUser.id) || '';
+        }
+        if (!otherUserId) return;
+
+        let otherUser = users.find(u => u.id === otherUserId) || fetchedUsersMap[otherUserId];
+        if (!otherUser) {
+          otherUser = {
+            id: otherUserId,
+            name: chatVal?.userName || 'Pengguna Vimos',
+            email: '',
+            bio: '',
+            photoURL: chatVal?.userPhoto || `https://api.dicebear.com/7.x/initials/svg?seed=${otherUserId}&backgroundColor=000000`,
+            followers: [],
+            following: [],
+            recentCaptures: [],
+            totalLikes: 0
+          };
+          // Fetch from RTDB in background so real name & avatar display
+          get(ref(db, `users/${otherUserId}`)).then(snap => {
+            if (snap.exists()) {
+              const val = snap.val();
+              setFetchedUsersMap(prev => ({
+                ...prev,
+                [otherUserId]: {
+                  id: otherUserId,
+                  name: val.name || 'Pengguna Vimos',
+                  email: val.email || '',
+                  bio: val.bio || '',
+                  photoURL: val.photoURL || `https://api.dicebear.com/7.x/initials/svg?seed=${otherUserId}&backgroundColor=000000`,
+                  followers: val.followers ? Object.keys(val.followers) : [],
+                  following: val.following ? Object.keys(val.following) : [],
+                  recentCaptures: [],
+                  totalLikes: val.totalLikes || 0
+                }
+              }));
+            }
+          }).catch(() => {});
+        }
+
+        const messagesObj = chatVal?.messages;
+        let msgList: any[] = [];
+        if (messagesObj && typeof messagesObj === 'object') {
+          msgList = Object.entries(messagesObj)
             .map(([mId, mVal]: [string, any]) => ({
               id: mId,
               ...mVal
             }))
             .filter((m: any) => !isMsgDeletedForUser(m.deletedFor, currentUser.id))
-            .sort((a: any, b: any) => getTimestampNum(a.timestamp) - getTimestampNum(b.timestamp));
-
-          if (msgList.length === 0) return;
-          const isShopThread = chatVal?.isShopChat === true || msgList.some((m: any) => 
-            m.isShop === true ||
-            (m.text && (
-              m.text.includes('tertarik untuk membeli') || 
-              m.text.includes('membeli produk') || 
-              m.text.includes('dari toko Anda') ||
-              m.text.includes('Harga:')
-            ))
-          );
-          if (isShopThread) {
-            const lastMsg = msgList[msgList.length - 1];
-            const mediaSummary = lastMsg.photoURL || lastMsg.mediaType === 'image' ? '📷 Foto' : (lastMsg.videoURL || lastMsg.mediaType === 'video' ? '🎥 Video' : '');
-            threads.push({
-              chatId,
-              otherUser,
-              lastMessage: lastMsg.text || mediaSummary || 'Pesan',
-              lastMessageSenderId: lastMsg.senderId || '',
-              timestamp: lastMsg.timestamp || 0
+            .sort((a: any, b: any) => {
+              const tA = Math.max(getTimestampNum(a.timestamp), getTimestampNum(a.createdAt), getTimestampNum(a.lastUpdated), 0);
+              const tB = Math.max(getTimestampNum(b.timestamp), getTimestampNum(b.createdAt), getTimestampNum(b.lastUpdated), 0);
+              const diff = tA - tB;
+              if (diff !== 0) return diff;
+              return (a.id || '').localeCompare(b.id || '');
             });
+        }
+
+        // If no undeleted messages and no lastMessage text, ignore
+        if (msgList.length === 0 && !chatVal?.lastMessage) return;
+
+        let maxMessageTime = 0;
+        let latestMsgObj: any = null;
+        for (const m of msgList) {
+          const t = Math.max(
+            getTimestampNum(m.timestamp),
+            getTimestampNum(m.createdAt),
+            getTimestampNum(m.lastUpdated),
+            getTimestampNum(m.time),
+            0
+          );
+          if (t >= maxMessageTime) {
+            maxMessageTime = t;
+            latestMsgObj = m;
           }
-        });
-        threads.sort((a, b) => getTimestampNum(b.timestamp) - getTimestampNum(a.timestamp));
-        setShopChatThreads(threads);
-      }
-    }).catch(() => {});
+        }
+
+        const lastMsg = latestMsgObj || (msgList.length > 0 ? msgList[msgList.length - 1] : null);
+        const mediaSummary = lastMsg?.photoURL || lastMsg?.mediaType === 'image' 
+          ? '📷 Foto' 
+          : (lastMsg?.videoURL || lastMsg?.mediaType === 'video' ? '🎥 Video' : '');
+        const lastMessageText = lastMsg?.text || mediaSummary || chatVal?.lastMessage || 'Pesan';
+        const lastMessageSenderId = lastMsg?.senderId || chatVal?.lastSenderId || '';
+        
+        // Accurate thread timestamp calculation: takes the latest of message timestamp, lastUpdated, lastTimestamp, or chat creation timestamp
+        const threadTimestamp = Math.max(
+          maxMessageTime,
+          getTimestampNum(lastMsg?.timestamp),
+          getTimestampNum(chatVal?.lastUpdated),
+          getTimestampNum(chatVal?.lastTimestamp),
+          getTimestampNum(chatVal?.timestamp),
+          0
+        );
+
+        const unreadCount = msgList.filter((m: any) => 
+          m.senderId !== currentUser.id && 
+          !m.read && 
+          (!m.readBy || !m.readBy[safeUserId])
+        ).length;
+
+        const isShopThread = chatVal?.isShopChat === true || msgList.some((m: any) => 
+          m.isShop === true ||
+          (m.text && (
+            m.text.includes('tertarik untuk membeli') || 
+            m.text.includes('membeli produk') || 
+            m.text.includes('dari toko Anda') ||
+            m.text.includes('Harga:')
+          ))
+        );
+
+        const threadItem: ChatThread = {
+          chatId,
+          otherUser,
+          lastMessage: lastMessageText,
+          lastMessageSenderId,
+          timestamp: threadTimestamp,
+          unreadCount,
+          isShop: isShopThread,
+          mediaSummary
+        };
+
+        // Every chat thread where currentUser is part of appears in direct threads
+        directThreads.push(threadItem);
+
+        // Shop threads specifically for Shop tab
+        if (isShopThread) {
+          shopThreads.push(threadItem);
+        }
+      });
+
+      // Sort: newest activity ALWAYS at the top!
+      directThreads.sort((a, b) => {
+        if (b.timestamp !== a.timestamp) {
+          return b.timestamp - a.timestamp;
+        }
+        return (b.chatId || '').localeCompare(a.chatId || '');
+      });
+      shopThreads.sort((a, b) => {
+        if (b.timestamp !== a.timestamp) {
+          return b.timestamp - a.timestamp;
+        }
+        return (b.chatId || '').localeCompare(a.chatId || '');
+      });
+
+      setDirectChatThreads(directThreads);
+      setShopChatThreads(shopThreads);
+      setLoadingThreads(false);
+    };
+
+    // Instant initial get for zero-delay first render
+    get(chatsRef).then((snapshot) => {
+      parseChatsSnapshot(snapshot.val());
+    }).catch(() => {
+      setLoadingThreads(false);
+    });
 
     const unsubscribe = onValue(chatsRef, (snapshot) => {
-      const data = snapshot.val();
-      if (data && users.length > 0) {
-        const threads: ShopChatThread[] = [];
-
-        Object.entries(data).forEach(([chatId, chatVal]: [string, any]) => {
-          if (!chatId.includes(currentUser.id)) return;
-
-          const parts = chatId.split('_');
-          if (parts.length !== 2) return;
-          const otherUserId = parts.find(id => id !== currentUser.id);
-          if (!otherUserId) return;
-
-          const otherUser = users.find(u => u.id === otherUserId);
-          if (!otherUser) return;
-
-          const messagesObj = chatVal?.messages;
-          if (!messagesObj) return;
-
-          const msgList = Object.entries(messagesObj)
-            .map(([mId, mVal]: [string, any]) => ({
-              id: mId,
-              ...mVal
-            }))
-            .filter((m: any) => !isMsgDeletedForUser(m.deletedFor, currentUser.id))
-            .sort((a: any, b: any) => getTimestampNum(a.timestamp) - getTimestampNum(b.timestamp));
-
-          if (msgList.length === 0) return;
-
-          // Check if thread is a shop chat (explicit flag OR contains purchase/item inquiry text)
-          const isShopThread = chatVal?.isShopChat === true || msgList.some((m: any) => 
-            m.isShop === true ||
-            (m.text && (
-              m.text.includes('tertarik untuk membeli') || 
-              m.text.includes('membeli produk') || 
-              m.text.includes('dari toko Anda') ||
-              m.text.includes('Harga:')
-            ))
-          );
-
-          if (isShopThread) {
-            const lastMsg = msgList[msgList.length - 1];
-            const mediaSummary = lastMsg.photoURL || lastMsg.mediaType === 'image' ? '📷 Foto' : (lastMsg.videoURL || lastMsg.mediaType === 'video' ? '🎥 Video' : '');
-            threads.push({
-              chatId,
-              otherUser,
-              lastMessage: lastMsg.text || mediaSummary || 'Pesan',
-              lastMessageSenderId: lastMsg.senderId || '',
-              timestamp: lastMsg.timestamp || 0
-            });
-          }
-        });
-
-        threads.sort((a, b) => getTimestampNum(b.timestamp) - getTimestampNum(a.timestamp));
-        setShopChatThreads(threads);
-      } else {
-        setShopChatThreads([]);
-      }
+      parseChatsSnapshot(snapshot.val());
     });
 
     return () => unsubscribe();
@@ -545,18 +749,46 @@ const Chat: React.FC<ChatProps> = ({
 
   // Sync messages for selectedRecipient (direct / group)
   useEffect(() => {
-    if (!currentUser || !selectedRecipient) return;
+    if (!currentUser || !selectedRecipient) {
+      setMessages([]);
+      setIsLoadingMessages(false);
+      return;
+    }
 
+    setIsLoadingMessages(true);
     let chatPath = '';
     if (selectedRecipient.type === 'user') {
-      const chatId = getChatId(currentUser.id, (selectedRecipient.data as User).id);
+      const otherUser = selectedRecipient.data as User;
+      const chatId = getChatId(currentUser.id, otherUser.id);
       chatPath = `chats/${chatId}/messages`;
     } else {
       chatPath = `groups/${(selectedRecipient.data as Group).id}/messages`;
     }
 
     const chatRef = ref(db, chatPath);
+
+    // Instant direct fetch for selected chat messages
+    get(chatRef).then((snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const list = Object.entries(data)
+          .map(([id, val]: [string, any]) => ({
+            id,
+            ...val
+          }))
+          .filter((m: any) => !isMsgDeletedForUser(m.deletedFor, currentUser.id))
+          .sort((a, b) => getTimestampNum(a.timestamp) - getTimestampNum(b.timestamp));
+        setMessages(list);
+      } else {
+        setMessages([]);
+      }
+      setIsLoadingMessages(false);
+    }).catch(() => {
+      setIsLoadingMessages(false);
+    });
+
     const unsubscribe = onValue(chatRef, (snapshot) => {
+      setIsLoadingMessages(false);
       const data = snapshot.val();
       if (data) {
         const list = Object.entries(data)
@@ -882,37 +1114,101 @@ const Chat: React.FC<ChatProps> = ({
     const trimmedMsg = msg.trim();
     const mediaToSend = selectedMedia;
     const lastSummary = trimmedMsg || (mediaToSend?.type === 'image' ? '📷 Foto' : (mediaToSend?.type === 'video' ? '🎥 Video' : 'Pesan'));
+    const now = Date.now();
 
     let chatPath = '';
     if (selectedRecipient.type === 'user') {
-      const chatId = getChatId(currentUser.id, (selectedRecipient.data as User).id);
+      const otherUser = selectedRecipient.data as User;
+      const chatId = getChatId(currentUser.id, otherUser.id);
       chatPath = `chats/${chatId}/messages`;
 
-      if (activeTab === 'shop' || (selectedRecipient.data as any).isShop) {
-        update(ref(db, `chats/${chatId}`), {
-          isShopChat: true,
+      const isShop = activeTab === 'shop' || (selectedRecipient.data as any).isShop;
+
+      // Optimistically push this conversation to the top immediately!
+      setDirectChatThreads(prev => {
+        const existing = prev.find(t => t.chatId === chatId);
+        const updatedThread: ChatThread = {
+          chatId,
+          otherUser: existing?.otherUser || otherUser,
           lastMessage: lastSummary,
-          lastUpdated: serverTimestamp()
-        });
-      } else {
-        update(ref(db, `chats/${chatId}`), {
-          lastMessage: lastSummary,
-          lastUpdated: serverTimestamp()
+          lastMessageSenderId: currentUser.id,
+          timestamp: now,
+          unreadCount: 0,
+          isShop,
+          mediaSummary: mediaToSend?.type === 'image' ? '📷 Foto' : (mediaToSend?.type === 'video' ? '🎥 Video' : '')
+        };
+        return [updatedThread, ...prev.filter(t => t.chatId !== chatId)];
+      });
+
+      if (isShop) {
+        setShopChatThreads(prev => {
+          const existing = prev.find(t => t.chatId === chatId);
+          const updatedThread: ChatThread = {
+            chatId,
+            otherUser: existing?.otherUser || otherUser,
+            lastMessage: lastSummary,
+            lastMessageSenderId: currentUser.id,
+            timestamp: now,
+            unreadCount: 0,
+            isShop: true,
+            mediaSummary: mediaToSend?.type === 'image' ? '📷 Foto' : (mediaToSend?.type === 'video' ? '🎥 Video' : '')
+          };
+          return [updatedThread, ...prev.filter(t => t.chatId !== chatId)];
         });
       }
+
+      update(ref(db, `chats/${chatId}`), {
+        ...(isShop ? { isShopChat: true } : {}),
+        lastMessage: lastSummary,
+        lastUpdated: now,
+        lastTimestamp: now,
+        lastSenderId: currentUser.id
+      });
     } else {
       chatPath = `groups/${(selectedRecipient.data as Group).id}/messages`;
       update(ref(db, `groups/${(selectedRecipient.data as Group).id}`), {
         lastMessage: lastSummary,
-        lastTimestamp: Date.now()
+        lastTimestamp: now,
+        lastUpdated: now,
+        lastSenderId: currentUser.id
+      });
+
+      setGroups(prev => {
+        const gId = (selectedRecipient.data as Group).id;
+        const targetG = prev.find(g => g.id === gId);
+        if (!targetG) return prev;
+        const updatedG = { ...targetG, lastMessage: lastSummary, lastTimestamp: now, lastUpdated: now };
+        return [updatedG, ...prev.filter(g => g.id !== gId)];
       });
     }
+
+    // Optimistically append sent message for instant feedback
+    const optimisticId = `local_${Date.now()}`;
+    setMessages(prev => [
+      ...prev,
+      {
+        id: optimisticId,
+        senderId: currentUser.id,
+        text: trimmedMsg,
+        timestamp: now,
+        read: false,
+        ...(mediaToSend ? {
+          photoURL: mediaToSend.type === 'image' ? mediaToSend.url : undefined,
+          videoURL: mediaToSend.type === 'video' ? mediaToSend.url : undefined,
+          mediaType: mediaToSend.type,
+          mediaURL: mediaToSend.url,
+          fileName: mediaToSend.name,
+          fileSize: mediaToSend.size
+        } : {})
+      }
+    ]);
 
     const safeUserId = getSafeKey(currentUser.id);
     const messagePayload: any = {
       senderId: currentUser.id,
       text: trimmedMsg,
-      timestamp: serverTimestamp(),
+      timestamp: now,
+      lastUpdated: now,
       read: false,
       readBy: {
         [safeUserId]: true
@@ -1274,11 +1570,7 @@ const Chat: React.FC<ChatProps> = ({
       : maskedAvatar;
 
     return (
-      <div className={
-        isFullScreen
-          ? "fixed inset-0 z-[60] bg-zinc-950 text-white flex flex-col h-[100dvh] w-full overflow-hidden select-text animate-fade-in"
-          : "flex flex-col h-[calc(100vh-140px)] bg-zinc-950 text-white animate-fade-in rounded-3xl overflow-hidden border-2 border-red-900/40 shadow-2xl"
-      }>
+      <div className="fixed inset-0 z-[60] bg-zinc-950 text-white flex flex-col h-[100dvh] max-h-[100dvh] w-full max-w-xl mx-auto border-x border-zinc-800 shadow-2xl overflow-hidden select-text animate-fade-in">
         {/* Top Header */}
         <div className="p-3 sm:p-4 bg-zinc-900/95 backdrop-blur-md border-b border-white/10 flex items-center justify-between shadow-md sticky top-0 z-20">
           <div className="flex items-center space-x-2.5 sm:space-x-3 min-w-0">
@@ -1450,11 +1742,7 @@ const Chat: React.FC<ChatProps> = ({
     });
 
     return (
-      <div className={
-        isFullScreen
-          ? "fixed inset-0 z-[60] bg-white flex flex-col h-[100dvh] w-full overflow-y-auto p-4 sm:p-6 pb-24 animate-fade-in select-text"
-          : "p-4 flex flex-col h-full bg-white animate-fade-in"
-      }>
+      <div className="fixed inset-0 z-[60] bg-white flex flex-col h-[100dvh] max-h-[100dvh] w-full max-w-xl mx-auto border-x border-neutral-200/80 shadow-2xl overflow-y-auto p-4 sm:p-6 pb-24 animate-fade-in select-text">
         <div className="max-w-xl mx-auto w-full flex flex-col flex-1">
           <div className="flex items-center justify-between mb-6">
             <div className="flex items-center space-x-3">
@@ -1612,11 +1900,7 @@ const Chat: React.FC<ChatProps> = ({
     });
 
     return (
-      <div className={
-        isFullScreen
-          ? "fixed inset-0 z-[60] bg-white flex flex-col h-[100dvh] w-full overflow-y-auto p-4 sm:p-6 pb-24 animate-fade-in select-text"
-          : "p-4 flex flex-col h-full bg-white overflow-y-auto pb-20 animate-fade-in relative"
-      }>
+      <div className="fixed inset-0 z-[60] bg-white flex flex-col h-[100dvh] max-h-[100dvh] w-full max-w-xl mx-auto border-x border-neutral-200/80 shadow-2xl overflow-y-auto p-4 sm:p-6 pb-24 animate-fade-in select-text">
         <div className="max-w-xl mx-auto w-full">
           <div className="flex items-center mb-8">
             <button onClick={() => setIsViewingGroupSettings(false)} className="mr-4 w-10 h-10 flex items-center justify-center rounded-full hover:bg-gray-100 transition-colors">
@@ -1845,15 +2129,19 @@ const Chat: React.FC<ChatProps> = ({
 
   if (!selectedRecipient) {
     return (
-      <div className="p-3 sm:p-4 h-full flex flex-col animate-fade-in relative max-w-2xl mx-auto w-full">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-3xl font-black uppercase tracking-tighter">Vimos</h2>
+      <div className="p-3 sm:p-4 pb-28 min-h-full flex flex-col animate-fade-in relative max-w-xl mx-auto w-full">
+        <div className="flex items-center justify-between mb-3.5">
+          <div>
+            <h2 className="text-xl sm:text-2xl font-black uppercase tracking-tight text-neutral-900">Kotak Masuk</h2>
+            <p className="text-[10px] text-neutral-400 font-bold uppercase tracking-wider">Obrolan Langsung & Grup</p>
+          </div>
           <button 
             onClick={() => setIsCreatingGroup(true)}
-            className="w-11 h-11 flex items-center justify-center border-2 border-black rounded-full hover:bg-black hover:text-white transition-all shadow-md active:scale-90"
-            title="Buat Grup"
+            className="px-3.5 py-2 flex items-center space-x-1.5 bg-neutral-950 hover:bg-black text-white rounded-2xl text-[10px] font-black uppercase tracking-wider transition-all shadow-sm active:scale-95 cursor-pointer shrink-0"
+            title="Buat Grup Baru"
           >
-            <i className="fas fa-users-viewfinder text-base"></i>
+            <i className="fas fa-plus text-[9px] text-amber-400"></i>
+            <span>Grup Baru</span>
           </button>
         </div>
 
@@ -1930,8 +2218,8 @@ const Chat: React.FC<ChatProps> = ({
 
         <div className="space-y-4 flex-1 overflow-y-auto pr-1">
           {activeTab === 'direct' && (
-            <div className="space-y-3">
-              {/* SEARCH BAR FOR FINDING PEOPLE */}
+            <div className="space-y-4">
+              {/* SEARCH BAR FOR FINDING ANYONE ON VIMOS */}
               <div className="relative">
                 <i className="fas fa-search absolute left-3.5 top-1/2 -translate-y-1/2 text-neutral-400 text-xs"></i>
                 <input
@@ -1956,20 +2244,20 @@ const Chat: React.FC<ChatProps> = ({
                 <div className="space-y-2">
                   <div className="flex items-center justify-between px-1">
                     <span className="text-[10px] font-black uppercase tracking-wider text-neutral-500">
-                      Hasil Pencarian Orang ({users.filter(u => u.id !== currentUser?.id && isMutual(u.id) && ((u.name || '').toLowerCase().includes(userSearchQuery.toLowerCase()) || (u.email || '').toLowerCase().includes(userSearchQuery.toLowerCase()))).length})
+                      Hasil Pencarian ({users.filter(u => u.id !== currentUser?.id && ((u.name || '').toLowerCase().includes(userSearchQuery.toLowerCase()) || (u.email || '').toLowerCase().includes(userSearchQuery.toLowerCase()))).length})
                     </span>
                   </div>
 
-                  {users.filter(u => u.id !== currentUser?.id && isMutual(u.id) && ((u.name || '').toLowerCase().includes(userSearchQuery.toLowerCase()) || (u.email || '').toLowerCase().includes(userSearchQuery.toLowerCase()))).length === 0 ? (
+                  {users.filter(u => u.id !== currentUser?.id && ((u.name || '').toLowerCase().includes(userSearchQuery.toLowerCase()) || (u.email || '').toLowerCase().includes(userSearchQuery.toLowerCase()))).length === 0 ? (
                     <div className="text-center py-10 bg-white rounded-3xl border border-neutral-200/80 p-6 space-y-2">
                       <div className="w-12 h-12 rounded-full bg-neutral-100 flex items-center justify-center text-neutral-400 text-lg mx-auto">
                         <i className="fas fa-user-slash"></i>
                       </div>
                       <p className="text-xs font-bold text-neutral-800">Tidak ada pengguna ditemukan</p>
-                      <p className="text-[10px] text-neutral-500">Hanya teman yang saling follow balik yang dapat dicari untuk obrolan chat.</p>
+                      <p className="text-[10px] text-neutral-500">Coba cari dengan nama atau username lain.</p>
                     </div>
                   ) : (
-                    users.filter(u => u.id !== currentUser?.id && isMutual(u.id) && ((u.name || '').toLowerCase().includes(userSearchQuery.toLowerCase()) || (u.email || '').toLowerCase().includes(userSearchQuery.toLowerCase()))).map(u => {
+                    users.filter(u => u.id !== currentUser?.id && ((u.name || '').toLowerCase().includes(userSearchQuery.toLowerCase()) || (u.email || '').toLowerCase().includes(userSearchQuery.toLowerCase()))).map(u => {
                       const uOnline = isUserOnline(u.id);
                       const isMutualUser = isMutual(u.id);
                       const isFollowed = (currentUser?.following || []).includes(u.id);
@@ -2025,72 +2313,191 @@ const Chat: React.FC<ChatProps> = ({
                   )}
                 </div>
               ) : (
-                /* CASE B: NOT SEARCHING -> SHOW ACTIVE CONVERSATIONS & MUTUAL FOLLOWERS */
-                <div className="space-y-3">
-                  {mutualFollowers.length === 0 ? (
-                    <div className="text-center py-16 bg-neutral-50 rounded-3xl border border-neutral-200/80 p-6 space-y-2">
-                      <div className="w-12 h-12 rounded-full bg-neutral-200/70 text-neutral-600 flex items-center justify-center text-lg mx-auto shadow-inner">
-                        <i className="fas fa-users-rays"></i>
-                      </div>
-                      <h4 className="font-black text-xs uppercase text-neutral-900">Belum Ada Kontak Chat</h4>
-                      <p className="text-xs text-neutral-500 max-w-xs mx-auto leading-relaxed">
-                        Hanya pengguna yang saling follow balik (teman mutual) yang dapat dihubungi melalui obrolan chat!
-                      </p>
+                /* CASE B: NOT SEARCHING -> SHOW ACTIVE CONVERSATIONS & CONTACTS */
+                <div className="space-y-4">
+                  {/* SECTION 1: PERCAKAPAN AKTIF (CONVERSATION THREADS) */}
+                  {loadingThreads ? (
+                    <div className="py-8 text-center space-y-2">
+                      <div className="w-6 h-6 border-2 border-black border-t-transparent rounded-full animate-spin mx-auto"></div>
+                      <p className="text-[11px] font-bold text-neutral-400">Memuat obrolan...</p>
                     </div>
-                  ) : (
-                    mutualFollowers.map(u => {
-                      const uOnline = isUserOnline(u.id);
-                      const uStatusText = getUserLastSeenText(u.id);
+                  ) : directChatThreads.length > 0 ? (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between px-1">
+                        <span className="text-[10px] font-black uppercase tracking-wider text-neutral-500">
+                          Percakapan ({directChatThreads.length})
+                        </span>
+                      </div>
 
-                      return (
-                        <div key={u.id} className="flex items-center border border-neutral-200/90 rounded-2xl hover:border-black transition-all group p-3.5 bg-white shadow-xs">
-                          <div className="relative shrink-0 mr-3.5">
-                            <img 
-                              src={u.photoURL} 
-                              className="w-12 h-12 rounded-full border border-neutral-200 bg-neutral-100 cursor-pointer object-cover shadow-xs" 
-                              alt={u.name} 
-                              onClick={() => onUserClick(u.id)}
-                            />
-                            {uOnline ? (
-                              <span className="absolute bottom-0 right-0 w-3.5 h-3.5 bg-emerald-500 rounded-full border-2 border-white ring-1 ring-emerald-400 animate-pulse shadow-xs" title="Online"></span>
-                            ) : (
-                              <span className="absolute bottom-0 right-0 w-3.5 h-3.5 bg-neutral-300 rounded-full border-2 border-white" title="Offline"></span>
-                            )}
-                          </div>
-                          <button 
-                            onClick={() => setSelectedRecipient({ type: 'user', data: u })}
-                            className="flex-1 text-left min-w-0"
+                      {directChatThreads.map((thread) => {
+                        const otherOnline = isUserOnline(thread.otherUser.id);
+                        const isMyLastMsg = thread.lastMessageSenderId === currentUser?.id;
+                        return (
+                          <div 
+                            key={thread.chatId} 
+                            onClick={() => setSelectedRecipient({ type: 'user', data: thread.otherUser })}
+                            className="flex items-center border border-neutral-200/90 hover:border-black rounded-2xl transition-all group p-3.5 bg-white shadow-xs cursor-pointer select-none"
                           >
-                            <div className="flex items-center space-x-2">
-                              <p className="font-extrabold text-xs sm:text-sm uppercase text-neutral-900 truncate">{u.name}</p>
-                              {uOnline ? (
-                                <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-full text-[8px] font-extrabold bg-emerald-50 text-emerald-600 border border-emerald-200 shrink-0">
-                                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                                  <span>Online</span>
-                                </span>
+                            <div className="relative shrink-0 mr-3.5">
+                              <img 
+                                src={thread.otherUser.photoURL} 
+                                className="w-12 h-12 rounded-full border border-neutral-200 bg-neutral-100 object-cover shadow-xs" 
+                                alt={thread.otherUser.name} 
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onUserClick(thread.otherUser.id);
+                                }}
+                              />
+                              {otherOnline ? (
+                                <span className="absolute bottom-0 right-0 w-3.5 h-3.5 bg-emerald-500 rounded-full border-2 border-white ring-1 ring-emerald-400 animate-pulse shadow-xs" title="Online"></span>
                               ) : (
-                                <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-full text-[8px] font-semibold bg-neutral-100 text-neutral-400 border border-neutral-200 shrink-0">
-                                  <span className="w-1.5 h-1.5 rounded-full bg-neutral-300"></span>
-                                  <span>Offline</span>
-                                </span>
+                                <span className="absolute bottom-0 right-0 w-3.5 h-3.5 bg-neutral-300 rounded-full border-2 border-white" title="Offline"></span>
                               )}
                             </div>
-                            <p className="text-[10px] text-neutral-400 font-bold uppercase tracking-widest mt-0.5 truncate">
-                              {uOnline ? 'Aktif Sekarang' : uStatusText}
-                            </p>
-                          </button>
-                          <button
-                            onClick={(e) => handleClearDirectUserChat(u.id, e)}
-                            className="p-2 text-neutral-300 hover:text-red-600 hover:bg-red-50 rounded-full text-xs transition-colors mr-2 cursor-pointer"
-                            title="Hapus riwayat obrolan"
-                          >
-                            <i className="fas fa-trash-can"></i>
-                          </button>
-                          <i className="fas fa-chevron-right text-neutral-300 group-hover:text-black transition-colors"></i>
+
+                            <div className="flex-1 text-left min-w-0 mr-2">
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center space-x-1.5 truncate">
+                                  <p className="font-extrabold text-xs sm:text-sm uppercase text-neutral-900 truncate">
+                                    {thread.otherUser.name}
+                                  </p>
+                                  {thread.isShop && (
+                                    <span className="bg-yellow-400 text-black text-[7px] font-black uppercase px-1.5 py-0.2 rounded-md shrink-0">
+                                      Toko
+                                    </span>
+                                  )}
+                                </div>
+                                {thread.timestamp > 0 && (
+                                  <span className="text-[9px] font-semibold text-neutral-400 ml-2 shrink-0">
+                                    {formatChatTimestamp(thread.timestamp)}
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="flex items-center justify-between mt-1">
+                                <p className={`text-[11px] truncate max-w-[220px] sm:max-w-xs ${
+                                  thread.unreadCount > 0 ? 'font-bold text-neutral-900' : 'text-neutral-500 font-medium'
+                                }`}>
+                                  {isMyLastMsg ? (
+                                    <span className="text-neutral-400 font-normal">Anda: </span>
+                                  ) : null}
+                                  {thread.lastMessage}
+                                </p>
+
+                                {thread.unreadCount > 0 && (
+                                  <span className="px-2 py-0.5 bg-black text-white text-[9px] font-black rounded-full shrink-0 shadow-xs ml-2">
+                                    {thread.unreadCount}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+
+                            <button
+                              onClick={(e) => handleClearDirectUserChat(thread.otherUser.id, e)}
+                              className="p-2 text-neutral-300 hover:text-red-600 hover:bg-red-50 rounded-full text-xs transition-colors shrink-0 cursor-pointer"
+                              title="Hapus riwayat obrolan"
+                            >
+                              <i className="fas fa-trash-can"></i>
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+
+                  {/* SECTION 2: KONTAK & TEMAN UNTUK MULAI CHAT */}
+                  <div className="space-y-2 pt-2">
+                    <div className="flex items-center justify-between px-1">
+                      <span className="text-[10px] font-black uppercase tracking-wider text-neutral-500">
+                        {directChatThreads.length > 0 ? 'Mulai Chat dengan Teman' : 'Teman & Kontak'}
+                      </span>
+                    </div>
+
+                    {mutualFollowers.length === 0 ? (
+                      directChatThreads.length === 0 ? (
+                        <div className="text-center py-12 bg-neutral-50 rounded-3xl border border-neutral-200/80 p-6 space-y-3">
+                          <div className="w-12 h-12 rounded-full bg-neutral-200/70 text-neutral-600 flex items-center justify-center text-lg mx-auto shadow-inner">
+                            <i className="fas fa-comments"></i>
+                          </div>
+                          <h4 className="font-black text-xs uppercase text-neutral-900">Belum Ada Obrolan</h4>
+                          <p className="text-xs text-neutral-500 max-w-xs mx-auto leading-relaxed">
+                            Cari teman di atas atau pilih pengguna aktif di bawah untuk mulai mengobrol!
+                          </p>
+
+                          {/* Quick suggestions from all available users */}
+                          {users.filter(u => u.id !== currentUser?.id).length > 0 && (
+                            <div className="pt-3 space-y-2">
+                              {users.filter(u => u.id !== currentUser?.id).slice(0, 5).map(u => (
+                                <div key={u.id} className="flex items-center justify-between p-2.5 bg-white border border-neutral-200 rounded-2xl">
+                                  <div className="flex items-center space-x-2.5 min-w-0">
+                                    <img src={u.photoURL} className="w-9 h-9 rounded-full object-cover border border-neutral-200" alt={u.name} />
+                                    <p className="text-xs font-bold uppercase truncate text-neutral-800">{u.name}</p>
+                                  </div>
+                                  <button
+                                    onClick={() => setSelectedRecipient({ type: 'user', data: u })}
+                                    className="px-3 py-1 bg-black text-white text-[10px] font-black uppercase rounded-xl hover:bg-neutral-800"
+                                  >
+                                    Chat
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
                         </div>
-                      );
-                    })
-                  )}
+                      ) : null
+                    ) : (
+                      mutualFollowers.map(u => {
+                        const uOnline = isUserOnline(u.id);
+                        const uStatusText = getUserLastSeenText(u.id);
+
+                        return (
+                          <div key={u.id} className="flex items-center border border-neutral-200/90 rounded-2xl hover:border-black transition-all group p-3 bg-white shadow-xs">
+                            <div className="relative shrink-0 mr-3">
+                              <img 
+                                src={u.photoURL} 
+                                className="w-10 h-10 rounded-full border border-neutral-200 bg-neutral-100 cursor-pointer object-cover shadow-xs" 
+                                alt={u.name} 
+                                onClick={() => onUserClick(u.id)}
+                              />
+                              {uOnline ? (
+                                <span className="absolute bottom-0 right-0 w-3 h-3 bg-emerald-500 rounded-full border-2 border-white ring-1 ring-emerald-400 animate-pulse shadow-xs" title="Online"></span>
+                              ) : (
+                                <span className="absolute bottom-0 right-0 w-3 h-3 bg-neutral-300 rounded-full border-2 border-white" title="Offline"></span>
+                              )}
+                            </div>
+                            <div 
+                              onClick={() => setSelectedRecipient({ type: 'user', data: u })}
+                              className="flex-1 text-left min-w-0 cursor-pointer"
+                            >
+                              <div className="flex items-center space-x-2">
+                                <p className="font-extrabold text-xs uppercase text-neutral-900 truncate">{u.name}</p>
+                                {uOnline ? (
+                                  <span className="inline-flex items-center space-x-1 px-1.5 py-0.2 rounded-full text-[8px] font-extrabold bg-emerald-50 text-emerald-600 border border-emerald-200 shrink-0">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                                    <span>Online</span>
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center space-x-1 px-1.5 py-0.2 rounded-full text-[8px] font-semibold bg-neutral-100 text-neutral-400 border border-neutral-200 shrink-0">
+                                    <span>Offline</span>
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-[10px] text-neutral-400 font-semibold truncate mt-0.5">
+                                {uOnline ? 'Aktif Sekarang' : uStatusText}
+                              </p>
+                            </div>
+                            <button
+                              onClick={() => setSelectedRecipient({ type: 'user', data: u })}
+                              className="px-3 py-1.5 bg-neutral-950 hover:bg-black text-white text-[10px] font-black uppercase rounded-xl transition-all shadow-xs active:scale-95 flex items-center space-x-1 cursor-pointer"
+                            >
+                              <i className="fas fa-paper-plane text-[9px] text-amber-400"></i>
+                              <span>Chat</span>
+                            </button>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
                 </div>
               )}
             </div>
@@ -2362,11 +2769,7 @@ const Chat: React.FC<ChatProps> = ({
     : null;
 
   return (
-    <div className={
-      isFullScreen 
-        ? "fixed inset-0 z-[60] bg-[#f8fafc] flex flex-col h-[100dvh] w-full overflow-hidden select-text animate-fade-in"
-        : "flex flex-col h-[calc(100vh-140px)] bg-[#f8fafc] rounded-3xl border border-neutral-200 overflow-hidden shadow-md animate-fade-in"
-    }>
+    <div className="fixed inset-0 z-[60] bg-[#f8fafc] flex flex-col h-[100dvh] max-h-[100dvh] w-full max-w-xl mx-auto border-x border-neutral-200/80 shadow-2xl overflow-hidden select-text animate-fade-in">
       <div className="p-3 sm:p-4 border-b border-black/10 flex items-center justify-between space-x-3 bg-white/95 backdrop-blur-md sticky top-0 z-20 shadow-xs">
         <div className="flex items-center space-x-2.5 sm:space-x-3 min-w-0">
           <button 
@@ -2518,15 +2921,6 @@ const Chat: React.FC<ChatProps> = ({
               </button>
             </>
           )}
-
-          {/* Toggle Full Screen Button */}
-          <button
-            onClick={() => setIsFullScreen(!isFullScreen)}
-            className="w-9 h-9 sm:w-10 sm:h-10 flex items-center justify-center rounded-full hover:bg-neutral-100 text-neutral-600 hover:text-black transition-colors"
-            title={isFullScreen ? "Kecilkan Tampilan" : "Tampilan Penuh Layar"}
-          >
-            <i className={`fas ${isFullScreen ? 'fa-compress' : 'fa-expand'} text-xs`}></i>
-          </button>
         </div>
       </div>
       
@@ -2538,9 +2932,15 @@ const Chat: React.FC<ChatProps> = ({
         />
       )}
 
-      <div className="flex-1 overflow-y-auto p-3 sm:p-6 space-y-4 bg-[#f1f3f7] scroll-smooth">
-        <div className="max-w-4xl mx-auto w-full flex-1 flex flex-col justify-end min-h-full space-y-4">
-        {messages.length === 0 ? (
+      <div className="flex-1 overflow-y-auto px-3 sm:px-4 py-3 bg-[#f1f3f7] overscroll-contain">
+        <div className="w-full flex-1 flex flex-col min-h-full">
+          <div className="flex-1 min-h-[10px]" />
+          {isLoadingMessages ? (
+          <div className="flex flex-col items-center justify-center py-20 space-y-3 my-auto">
+            <div className="w-8 h-8 border-2 border-black border-t-transparent rounded-full animate-spin"></div>
+            <span className="text-[11px] font-bold text-neutral-400">Memuat pesan...</span>
+          </div>
+        ) : messages.length === 0 ? (
           <div className="text-center py-16 px-4 my-auto">
             <div className="w-16 h-16 rounded-full bg-neutral-200 flex items-center justify-center mx-auto mb-3 text-neutral-500 text-2xl shadow-inner">
               <i className={selectedRecipient.type === 'group' ? "fas fa-comments" : "fas fa-comment-dots"}></i>
@@ -2869,12 +3269,14 @@ const Chat: React.FC<ChatProps> = ({
                 value={msg}
                 onChange={e => handleInputChange(e.target.value)}
                 onKeyDown={e => {
-                  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-                    e.preventDefault();
-                    handleSend(e);
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    if (window.innerWidth >= 768 || e.ctrlKey || e.metaKey) {
+                      e.preventDefault();
+                      handleSend(e);
+                    }
                   }
                 }}
-                placeholder={selectedMedia ? "Tambahkan keterangan / caption..." : "Ketik pesan... (Enter untuk baris baru, Ctrl+Enter untuk kirim)"}
+                placeholder={selectedMedia ? "Tambahkan keterangan / caption..." : "Ketik pesan..."}
                 className="w-full bg-transparent text-sm focus:outline-none resize-none leading-relaxed max-h-28 placeholder:text-neutral-400 py-1"
                 style={{ minHeight: '28px' }}
               />

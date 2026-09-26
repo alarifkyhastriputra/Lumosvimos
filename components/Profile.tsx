@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { User, Post } from '../types.ts';
 import UserListModal from './UserListModal.tsx';
 import PostCard from './PostCard.tsx';
@@ -11,7 +11,7 @@ interface ProfileProps {
   user: User;
   users: User[];
   posts?: Post[];
-  currentUser: User;
+  currentUser?: User | null;
   onToggleFollow: (id: string) => void;
   onUpdateProfile: (data: Partial<User>) => void;
   onAddCapture: (url: string) => void;
@@ -19,6 +19,7 @@ interface ProfileProps {
   onLogout: () => void;
   onBanUser?: (userId: string) => void;
   onSetRole?: (userId: string, role: string, color?: string) => void;
+  onToggleAdmin?: (userId: string, currentStatus: boolean) => void;
   onLike?: (id: string) => void;
   onDislike?: (id: string) => void;
   onComment?: (postId: string, text: string) => void;
@@ -28,7 +29,7 @@ interface ProfileProps {
 
 const Profile = ({ 
   user, 
-  users, 
+  users = [], 
   posts = [],
   currentUser, 
   onToggleFollow, 
@@ -38,6 +39,7 @@ const Profile = ({
   onLogout,
   onBanUser,
   onSetRole,
+  onToggleAdmin,
   onLike,
   onDislike,
   onComment,
@@ -50,23 +52,32 @@ const Profile = ({
   const [isEditing, setIsEditing] = useState(false);
   const [selectedPostId, setSelectedPostId] = useState<string | null>(null);
   const [editData, setEditData] = useState({ 
-    name: user.name || '', 
-    bio: user.bio || '' 
+    name: user?.name || '', 
+    bio: user?.bio || '' 
   });
 
-  const isMe = user.id === currentUser.id;
-  const isFollowing = (currentUser.following || []).includes(user.id);
-  const isAdminViewing = currentUser.isAdmin;
-  const isTargetAdmin = user.isAdmin;
-  const isBanned = user.isBanned;
+  useEffect(() => {
+    if (user) {
+      setEditData({
+        name: user.name || '',
+        bio: user.bio || ''
+      });
+    }
+  }, [user?.id, user?.name, user?.bio]);
 
-  const followersList = users.filter(u => (user.followers || []).includes(u.id));
-  const followingList = users.filter(u => (user.following || []).includes(u.id));
+  const isMe = Boolean(currentUser && user && user.id === currentUser.id);
+  const isFollowing = Boolean(currentUser?.following && user?.id && currentUser.following.includes(user.id));
+  const isAdminViewing = Boolean(currentUser?.isAdmin);
+  const isTargetAdmin = Boolean(user?.isAdmin);
+  const isBanned = Boolean(user?.isBanned);
+
+  const followersList = users.filter(u => (user?.followers || []).includes(u.id));
+  const followingList = users.filter(u => (user?.following || []).includes(u.id));
 
   // Fallback data
-  const displayName = user.name && user.name.trim() !== '' ? user.name : 'Unknown Orbit';
-  const displayBio = user.bio && user.bio.trim() !== '' ? user.bio : 'No bio shared yet.';
-  const displayPhoto = user.photoURL || `https://api.dicebear.com/7.x/initials/svg?seed=${displayName}&backgroundColor=000000&fontFamily=Inter&fontWeight=700`;
+  const displayName = user?.name && user.name.trim() !== '' ? user.name : 'Unknown Orbit';
+  const displayBio = user?.bio && user.bio.trim() !== '' ? user.bio : 'No bio shared yet.';
+  const displayPhoto = user?.photoURL || `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(displayName)}&backgroundColor=000000&fontFamily=Inter&fontWeight=700`;
 
   const handleSave = () => {
     onUpdateProfile({
@@ -209,6 +220,37 @@ const Profile = ({
               <span>{displayName}</span>
               {user.equippedBadge && <span className="text-xl ml-1">{user.equippedBadge}</span>}
             </h2>
+
+            {/* Online / Offline Presence Badge */}
+            <div className="flex items-center justify-center space-x-2 mb-2">
+              {user.isOnline ? (
+                <span className="inline-flex items-center space-x-1.5 px-3 py-1 bg-emerald-50 border border-emerald-200 rounded-full text-[10px] font-bold text-emerald-600 shadow-2xs">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                  <span>{t('status_online_active')}</span>
+                </span>
+              ) : (
+                <span className="inline-flex items-center space-x-1.5 px-3 py-1 bg-neutral-100 border border-neutral-200 rounded-full text-[10px] font-medium text-neutral-500 shadow-2xs">
+                  <span className="w-2 h-2 rounded-full bg-neutral-400"></span>
+                  <span>{t('status_offline')}</span>
+                </span>
+              )}
+            </div>
+
+            {/* Google Verified Account Badge */}
+            {Boolean(user.isGoogleLinked || user.googleEmail) && (
+              <div className="inline-flex items-center space-x-1.5 px-3 py-1 bg-neutral-50 border border-neutral-200 rounded-full text-[10px] font-bold text-neutral-700 mb-2 shadow-2xs">
+                <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24">
+                  <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                  <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                  <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+                  <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+                </svg>
+                <span>{t('link_google_badge_verified')}</span>
+                {user.googleEmail && isMe && (
+                  <span className="text-neutral-400 font-normal truncate max-w-[120px]">({user.googleEmail})</span>
+                )}
+              </div>
+            )}
             
             {/* Admin-only Email View */}
             {isAdminViewing && (
@@ -257,8 +299,19 @@ const Profile = ({
                       </button>
                     )}
                     
-                    {isAdminViewing && !isTargetAdmin && (
+                    {isAdminViewing && (
                       <>
+                        <button 
+                          onClick={() => onToggleAdmin && onToggleAdmin(user.id, Boolean(user.isAdmin))}
+                          className={`w-10 h-10 flex items-center justify-center border-2 rounded-full transition-all shadow-md active:scale-90 ${
+                            user.isAdmin 
+                              ? 'border-amber-500 bg-amber-400 text-black hover:bg-amber-500' 
+                              : 'border-amber-500 text-amber-600 hover:bg-amber-500 hover:text-white'
+                          }`}
+                          title={user.isAdmin ? 'Cabut Akses Admin Vimos' : 'Beri Akses Admin Vimos'}
+                        >
+                          <i className={`fas ${user.isAdmin ? 'fa-shield-minus' : 'fa-crown'} text-sm`}></i>
+                        </button>
                         <button 
                           onClick={handleSetRole}
                           className="w-10 h-10 flex items-center justify-center border-2 border-blue-600 text-blue-600 rounded-full hover:bg-blue-600 hover:text-white transition-all shadow-md active:scale-90"
@@ -460,6 +513,28 @@ const Profile = ({
                     <span>{t('chinese')}</span>
                   </button>
                 </div>
+              </div>
+
+              {/* Linked Google Account status */}
+              <div className="space-y-1.5 p-3.5 bg-neutral-50 border border-neutral-200 rounded-2xl">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2">
+                    <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
+                      <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                      <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                      <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+                      <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+                    </svg>
+                    <span className="text-xs font-black text-neutral-900">Akun Google</span>
+                  </div>
+                  <span className="text-[10px] font-black uppercase text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200 flex items-center space-x-1">
+                    <i className="fas fa-check text-[8px]"></i>
+                    <span>{t('link_google_badge_verified')}</span>
+                  </span>
+                </div>
+                <p className="text-[11px] text-neutral-500 truncate pl-6">
+                  {user.googleEmail || currentUser.googleEmail || currentUser.email || 'Akun Google Terhubung'}
+                </p>
               </div>
 
               <div className="border-t border-gray-100 pt-4 flex flex-col space-y-2">

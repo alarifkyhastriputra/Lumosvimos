@@ -1,14 +1,15 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { User, ChatMessage, Group } from '../types.ts';
 import { db } from '../firebase.ts';
 import { ref, onValue, push, serverTimestamp, set, update, remove, get } from 'firebase/database';
 import { ActiveCall } from './CallingOverlay.tsx';
 import { useLanguage } from '../LanguageContext.tsx';
-import HengkurAIChat from './HengkurAIChat.tsx';
+import { compressImage } from '../services/imageCompressor.ts';
 
 interface ChatProps {
   users: User[];
   currentUser: User | null;
+  userStatuses?: Record<string, { state: 'online' | 'offline'; last_changed?: number }>;
   onUserClick: (userId: string) => void;
   activeCalls?: ActiveCall[];
   onStartCall?: (type: 'private' | 'collective', mediaType: 'audio' | 'video', targetId: string, name?: string) => void;
@@ -25,6 +26,7 @@ interface ChatProps {
 const Chat: React.FC<ChatProps> = ({ 
   users, 
   currentUser, 
+  userStatuses,
   onUserClick, 
   activeCalls = [], 
   onStartCall, 
@@ -38,6 +40,51 @@ const Chat: React.FC<ChatProps> = ({
   onRequestPermission
 }) => {
   const { t } = useLanguage();
+  const [liveStatuses, setLiveStatuses] = useState<Record<string, { state: 'online' | 'offline'; last_changed?: number }>>(userStatuses || {});
+
+  useEffect(() => {
+    if (userStatuses) setLiveStatuses(userStatuses);
+  }, [userStatuses]);
+
+  useEffect(() => {
+    const statusRef = ref(db, 'status');
+    const unsub = onValue(statusRef, (snap) => {
+      const val = snap.val();
+      if (val) setLiveStatuses(val);
+    });
+    return () => unsub();
+  }, []);
+
+  const isUserOnline = (userId?: string) => {
+    if (!userId) return false;
+    if (currentUser && userId === currentUser.id) return true;
+    return liveStatuses[userId]?.state === 'online';
+  };
+
+  const getUserLastSeenText = (userId?: string) => {
+    if (!userId) return t('status_offline');
+    if (isUserOnline(userId)) return t('status_online_active');
+    const status = liveStatuses[userId];
+    const timestamp = status?.last_changed;
+    if (!timestamp) return t('status_offline');
+
+    const diff = Date.now() - timestamp;
+    if (diff < 60 * 1000) return `${t('status_offline')} • ${t('just_now')}`;
+    if (diff < 60 * 60 * 1000) {
+      const mins = Math.max(1, Math.floor(diff / (60 * 1000)));
+      return `${t('status_offline')} • ${mins} mnt lalu`;
+    }
+    const date = new Date(timestamp);
+    const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const isToday = new Date().toDateString() === date.toDateString();
+    if (isToday) return `${t('status_offline')} • Hari ini ${timeStr}`;
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    if (yesterday.toDateString() === date.toDateString()) {
+      return `${t('status_offline')} • Kemarin ${timeStr}`;
+    }
+    return `${t('status_offline')} • ${date.toLocaleDateString([], { day: 'numeric', month: 'short' })} ${timeStr}`;
+  };
   const [selectedRecipient, setSelectedRecipient] = useState<{ type: 'user' | 'group', data: User | Group } | null>(null);
   const [msg, setMsg] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -46,38 +93,15 @@ const Chat: React.FC<ChatProps> = ({
   const [isViewingGroupSettings, setIsViewingGroupSettings] = useState(false);
   const [groupName, setGroupName] = useState('');
   const [selectedForGroup, setSelectedForGroup] = useState<string[]>([]);
-  const [activeTab, setActiveTab] = useState<'direct' | 'shop' | 'groups' | 'anonymous' | 'hengkur_ai'>('direct');
-  const [botName, setBotName] = useState<string>('vimos.ai');
-  const [botAvatar, setBotAvatar] = useState<string>('');
-
-  // Sync AI Bot Name and Avatar from Firebase RTDB
-  useEffect(() => {
-    const configRef = ref(db, 'appConfig');
-    const unsub = onValue(configRef, (snapshot) => {
-      if (snapshot.exists()) {
-        const val = snapshot.val();
-        if (val) {
-          if (typeof val.aiBotName === 'string' && val.aiBotName.trim()) {
-            setBotName(val.aiBotName.trim());
-          } else {
-            setBotName('vimos.ai');
-          }
-          if (typeof val.aiBotAvatar === 'string') {
-            setBotAvatar(val.aiBotAvatar.trim());
-          } else {
-            setBotAvatar('');
-          }
-          return;
-        }
-      }
-      setBotName('vimos.ai');
-      setBotAvatar('');
-    });
-    return () => unsub();
-  }, []);
+  const [activeTab, setActiveTab] = useState<'direct' | 'shop' | 'groups' | 'anonymous'>('direct');
+  const [userSearchQuery, setUserSearchQuery] = useState('');
   const [shopSearchQuery, setShopSearchQuery] = useState('');
+  const [collectiveSearchQuery, setCollectiveSearchQuery] = useState('');
+  const [groupMemberSearchQuery, setGroupMemberSearchQuery] = useState('');
   const [addMemberSearch, setAddMemberSearch] = useState('');
   const [activeMenuMsgId, setActiveMenuMsgId] = useState<string | null>(null);
+  // Fullscreen view toggle state - defaults to true so chat and group chat are immersive edge-to-edge full screen
+  const [isFullScreen, setIsFullScreen] = useState(true);
 
   // Custom Confirmation Modal Pop-Up State
   const [confirmModal, setConfirmModal] = useState<{
@@ -104,6 +128,113 @@ const Chat: React.FC<ChatProps> = ({
   const [activeAnonRoom, setActiveAnonRoom] = useState<any | null>(null);
   const [anonMessages, setAnonMessages] = useState<{ id: string; senderId: string; text: string; timestamp: number }[]>([]);
   const [anonInputMsg, setAnonInputMsg] = useState('');
+
+  // Media Attachment States for Photos & Videos in Chat
+  const [selectedMedia, setSelectedMedia] = useState<{
+    url: string;
+    type: 'image' | 'video';
+    name?: string;
+    size?: string;
+  } | null>(null);
+  const [isProcessingMedia, setIsProcessingMedia] = useState(false);
+  const [fullscreenMedia, setFullscreenMedia] = useState<{
+    url: string;
+    type: 'image' | 'video';
+    caption?: string;
+    senderName?: string;
+    timestamp?: number;
+  } | null>(null);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+  const chatBottomRef = useRef<HTMLDivElement>(null);
+  const chatTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const anonTextareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Auto-resize chat textarea when message changes or is cleared
+  useEffect(() => {
+    if (chatTextareaRef.current) {
+      chatTextareaRef.current.style.height = 'auto';
+      chatTextareaRef.current.style.height = `${Math.min(chatTextareaRef.current.scrollHeight, 120)}px`;
+    }
+  }, [msg]);
+
+  useEffect(() => {
+    if (anonTextareaRef.current) {
+      anonTextareaRef.current.style.height = 'auto';
+      anonTextareaRef.current.style.height = `${Math.min(anonTextareaRef.current.scrollHeight, 100)}px`;
+    }
+  }, [anonInputMsg]);
+
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>, forcedType?: 'image' | 'video') => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const isVideo = forcedType === 'video' || file.type.startsWith('video/');
+    const isImage = forcedType === 'image' || file.type.startsWith('image/');
+
+    if (!isImage && !isVideo) {
+      setConfirmModal({
+        isOpen: true,
+        title: 'Format File Tidak Didukung',
+        message: 'Hanya file gambar (JPG, PNG, WEBP, GIF) dan video (MP4, WEBM, MOV) yang dapat dikirim ke obrolan.',
+        confirmText: 'Mengerti',
+        onConfirm: () => setConfirmModal(null)
+      });
+      if (e.target) e.target.value = '';
+      return;
+    }
+
+    const sizeInMB = file.size / (1024 * 1024);
+    if (isVideo && sizeInMB > 30) {
+      setConfirmModal({
+        isOpen: true,
+        title: 'Ukuran Video Terlalu Besar',
+        message: `Ukuran video adalah ${sizeInMB.toFixed(1)} MB. Maksimum ukuran video yang disarankan adalah 30 MB agar pengiriman cepat dan lancar.`,
+        confirmText: 'Pilih Video Lain',
+        onConfirm: () => setConfirmModal(null)
+      });
+      if (e.target) e.target.value = '';
+      return;
+    }
+
+    const formattedSize = sizeInMB >= 1 ? `${sizeInMB.toFixed(1)} MB` : `${Math.round(file.size / 1024)} KB`;
+
+    setIsProcessingMedia(true);
+    try {
+      if (isImage) {
+        // High quality smooth image compression for quick transmission and crisp viewing
+        const optimized = await compressImage(file, 1280, 1280, 0.85);
+        setSelectedMedia({
+          url: optimized,
+          type: 'image',
+          name: file.name,
+          size: formattedSize
+        });
+      } else {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          setSelectedMedia({
+            url: reader.result as string,
+            type: 'video',
+            name: file.name,
+            size: formattedSize
+          });
+          setIsProcessingMedia(false);
+        };
+        reader.onerror = () => {
+          setIsProcessingMedia(false);
+        };
+        reader.readAsDataURL(file);
+        return;
+      }
+    } catch (err) {
+      console.error('Error processing chat media:', err);
+    } finally {
+      setIsProcessingMedia(false);
+      if (e.target) e.target.value = '';
+    }
+  };
 
   const getChatId = (uid1: string, uid2: string) => {
     return [uid1, uid2].sort().join('_');
@@ -162,7 +293,8 @@ const Chat: React.FC<ChatProps> = ({
             id, 
             ...val, 
             participants: val.participants ? Object.keys(val.participants) : [],
-            admins: val.admins ? Object.keys(val.admins) : []
+            admins: val.admins ? Object.keys(val.admins) : [],
+            pendingInvites: val.pendingInvites || {}
           }))
           .filter((g: Group) => g.participants.includes(currentUser.id));
         setGroups(userGroups);
@@ -235,10 +367,11 @@ const Chat: React.FC<ChatProps> = ({
 
           if (isShopThread) {
             const lastMsg = msgList[msgList.length - 1];
+            const mediaSummary = lastMsg.photoURL || lastMsg.mediaType === 'image' ? '📷 Foto' : (lastMsg.videoURL || lastMsg.mediaType === 'video' ? '🎥 Video' : '');
             threads.push({
               chatId,
               otherUser,
-              lastMessage: lastMsg.text || '',
+              lastMessage: lastMsg.text || mediaSummary || 'Pesan',
               lastMessageSenderId: lastMsg.senderId || '',
               timestamp: lastMsg.timestamp || 0
             });
@@ -279,6 +412,34 @@ const Chat: React.FC<ChatProps> = ({
           .filter((m: any) => !isMsgDeletedForUser(m.deletedFor, currentUser.id))
           .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
         setMessages(list);
+
+        // Auto mark incoming unread messages as read when user is actively in this chat
+        const safeUserId = getSafeKey(currentUser.id);
+        if (selectedRecipient.type === 'user') {
+          const otherUserId = (selectedRecipient.data as User).id;
+          const otherUserSafeId = getSafeKey(otherUserId);
+          const unreadMsgs = list.filter((m: any) => m.senderId === otherUserId && (!m.read || !m.readBy || !m.readBy[safeUserId]));
+          if (unreadMsgs.length > 0) {
+            const chatId = getChatId(currentUser.id, otherUserId);
+            const updates: Record<string, any> = {};
+            unreadMsgs.forEach((m: any) => {
+              updates[`chats/${chatId}/messages/${m.id}/read`] = true;
+              updates[`chats/${chatId}/messages/${m.id}/readAt`] = Date.now();
+              updates[`chats/${chatId}/messages/${m.id}/readBy/${safeUserId}`] = true;
+            });
+            update(ref(db), updates).catch(err => console.error('Failed to mark read:', err));
+          }
+        } else if (selectedRecipient.type === 'group') {
+          const groupId = (selectedRecipient.data as Group).id;
+          const unreadGroupMsgs = list.filter((m: any) => m.senderId !== currentUser.id && (!m.readBy || !m.readBy[safeUserId]));
+          if (unreadGroupMsgs.length > 0) {
+            const updates: Record<string, any> = {};
+            unreadGroupMsgs.forEach((m: any) => {
+              updates[`groups/${groupId}/messages/${m.id}/readBy/${safeUserId}`] = true;
+            });
+            update(ref(db), updates).catch(err => console.error('Failed to mark group read:', err));
+          }
+        }
       } else {
         setMessages([]);
       }
@@ -534,69 +695,160 @@ const Chat: React.FC<ChatProps> = ({
     return () => unsubscribe();
   }, [activeAnonRoomId]);
 
+  // Auto scroll to bottom when new messages arrive
+  useEffect(() => {
+    if (messages.length > 0) {
+      setTimeout(() => {
+        chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }, 100);
+    }
+  }, [messages.length]);
+
   const handleSend = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!msg.trim() || !currentUser || !selectedRecipient) return;
+    if ((!msg.trim() && !selectedMedia) || !currentUser || !selectedRecipient) return;
+
+    const trimmedMsg = msg.trim();
+    const mediaToSend = selectedMedia;
+    const lastSummary = trimmedMsg || (mediaToSend?.type === 'image' ? '📷 Foto' : (mediaToSend?.type === 'video' ? '🎥 Video' : 'Pesan'));
 
     let chatPath = '';
     if (selectedRecipient.type === 'user') {
       const chatId = getChatId(currentUser.id, (selectedRecipient.data as User).id);
       chatPath = `chats/${chatId}/messages`;
 
-      if (activeTab === 'shop') {
+      if (activeTab === 'shop' || (selectedRecipient.data as any).isShop) {
         update(ref(db, `chats/${chatId}`), {
           isShopChat: true,
-          lastMessage: msg.trim(),
+          lastMessage: lastSummary,
+          lastUpdated: serverTimestamp()
+        });
+      } else {
+        update(ref(db, `chats/${chatId}`), {
+          lastMessage: lastSummary,
           lastUpdated: serverTimestamp()
         });
       }
     } else {
       chatPath = `groups/${(selectedRecipient.data as Group).id}/messages`;
+      update(ref(db, `groups/${(selectedRecipient.data as Group).id}`), {
+        lastMessage: lastSummary,
+        lastTimestamp: Date.now()
+      });
+    }
+
+    const safeUserId = getSafeKey(currentUser.id);
+    const messagePayload: any = {
+      senderId: currentUser.id,
+      text: trimmedMsg,
+      timestamp: serverTimestamp(),
+      read: false,
+      readBy: {
+        [safeUserId]: true
+      },
+      ...(activeTab === 'shop' ? { isShop: true } : {})
+    };
+
+    if (mediaToSend) {
+      if (mediaToSend.type === 'image') {
+        messagePayload.photoURL = mediaToSend.url;
+        messagePayload.mediaType = 'image';
+        messagePayload.mediaURL = mediaToSend.url;
+      } else if (mediaToSend.type === 'video') {
+        messagePayload.videoURL = mediaToSend.url;
+        messagePayload.mediaType = 'video';
+        messagePayload.mediaURL = mediaToSend.url;
+      }
+      if (mediaToSend.name) messagePayload.fileName = mediaToSend.name;
+      if (mediaToSend.size) messagePayload.fileSize = mediaToSend.size;
     }
 
     const chatRef = ref(db, chatPath);
-    push(chatRef, {
-      senderId: currentUser.id,
-      text: msg,
-      timestamp: serverTimestamp(),
-      ...(activeTab === 'shop' ? { isShop: true } : {})
-    });
+    push(chatRef, messagePayload);
     
     setMsg('');
+    setSelectedMedia(null);
+
+    // Scroll to bottom immediately
+    setTimeout(() => {
+      chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, 50);
   };
 
-  const handleCreateGroup = () => {
+  const handleCreateGroup = async () => {
     if (!currentUser || !groupName.trim() || selectedForGroup.length === 0) return;
     
     const groupsRef = ref(db, 'groups');
     const newGroupRef = push(groupsRef);
     const newGroupId = newGroupRef.key;
+    if (!newGroupId) return;
     
+    // Creator is the only direct active participant & admin initially
     const participants: Record<string, boolean> = { [currentUser.id]: true };
     const admins: Record<string, boolean> = { [currentUser.id]: true };
-    selectedForGroup.forEach(id => participants[id] = true);
+    
+    // Selected friends receive pending invitations
+    const pendingInvites: Record<string, any> = {};
+    selectedForGroup.forEach(id => {
+      pendingInvites[id] = {
+        userId: id,
+        inviterId: currentUser.id,
+        inviterName: currentUser.name,
+        inviterPhoto: currentUser.photoURL,
+        timestamp: Date.now()
+      };
+    });
 
     const createdGroupObj: Group = {
-      id: newGroupId || Date.now().toString(),
-      name: groupName,
+      id: newGroupId,
+      name: groupName.trim(),
       bio: 'New collective space.',
       creatorId: currentUser.id,
       participants: Object.keys(participants),
       admins: Object.keys(admins),
+      pendingInvites,
       timestamp: Date.now()
     };
 
-    set(newGroupRef, {
-      name: groupName,
+    await set(newGroupRef, {
+      name: groupName.trim(),
       bio: 'New collective space.',
       creatorId: currentUser.id,
       participants,
       admins,
+      pendingInvites,
       timestamp: serverTimestamp()
+    });
+
+    // Send notifications to each invited member
+    selectedForGroup.forEach(invitedUserId => {
+      const notifRef = push(ref(db, `notifications/${invitedUserId}`));
+      set(notifRef, {
+        id: notifRef.key,
+        senderId: currentUser.id,
+        senderName: currentUser.name,
+        senderPhoto: currentUser.photoURL,
+        type: 'group_invite',
+        groupId: newGroupId,
+        groupName: groupName.trim(),
+        status: 'pending',
+        timestamp: serverTimestamp(),
+        read: false
+      });
+    });
+
+    // Initial system announcement in group
+    const initMsgRef = push(ref(db, `groups/${newGroupId}/messages`));
+    set(initMsgRef, {
+      senderId: 'system',
+      text: `${currentUser.name} membuat grup "${groupName.trim()}". Undangan telah dikirim ke ${selectedForGroup.length} anggota orbit.`,
+      timestamp: serverTimestamp(),
+      read: true
     });
 
     setGroupName('');
     setSelectedForGroup([]);
+    setGroupMemberSearchQuery('');
     setIsCreatingGroup(false);
     setSelectedRecipient({ type: 'group', data: createdGroupObj });
     setActiveTab('groups');
@@ -606,8 +858,46 @@ const Chat: React.FC<ChatProps> = ({
     update(ref(db, `groups/${groupId}`), data);
   };
 
-  const handleAddMember = (groupId: string, userId: string) => {
-    set(ref(db, `groups/${groupId}/participants/${userId}`), true);
+  const handleInviteMember = async (groupId: string, userId: string, gName?: string, gPhoto?: string) => {
+    if (!currentUser) return;
+    const userToInvite = users.find(u => u.id === userId);
+
+    // Add to pending invites in Firebase
+    await set(ref(db, `groups/${groupId}/pendingInvites/${userId}`), {
+      userId,
+      inviterId: currentUser.id,
+      inviterName: currentUser.name,
+      inviterPhoto: currentUser.photoURL,
+      timestamp: Date.now()
+    });
+
+    // Send notification
+    const notifRef = push(ref(db, `notifications/${userId}`));
+    await set(notifRef, {
+      id: notifRef.key,
+      senderId: currentUser.id,
+      senderName: currentUser.name,
+      senderPhoto: currentUser.photoURL,
+      type: 'group_invite',
+      groupId: groupId,
+      groupName: gName || (selectedRecipient?.data as Group)?.name || 'Collective',
+      groupPhoto: gPhoto || (selectedRecipient?.data as Group)?.photoURL || null,
+      status: 'pending',
+      timestamp: serverTimestamp(),
+      read: false
+    });
+
+    setConfirmModal({
+      isOpen: true,
+      title: 'Undangan Terkirim! ✉️',
+      message: `Undangan bergabung ke grup telah dikirimkan ke notifikasi ${userToInvite?.name || 'pengguna'}. Mereka akan masuk ke grup setelah menekan tombol Terima.`,
+      confirmText: 'Mengerti',
+      onConfirm: () => setConfirmModal(null)
+    });
+  };
+
+  const handleCancelInvite = async (groupId: string, userId: string) => {
+    await set(ref(db, `groups/${groupId}/pendingInvites/${userId}`), null);
   };
 
   const handleRemoveMember = (groupId: string, userId: string) => {
@@ -813,19 +1103,23 @@ const Chat: React.FC<ChatProps> = ({
       : maskedAvatar;
 
     return (
-      <div className="flex flex-col h-[calc(100vh-140px)] bg-zinc-950 text-white animate-fade-in rounded-3xl overflow-hidden border-2 border-red-900/40 shadow-2xl">
+      <div className={
+        isFullScreen
+          ? "fixed inset-0 z-[60] bg-zinc-950 text-white flex flex-col h-[100dvh] w-full overflow-hidden select-text animate-fade-in"
+          : "flex flex-col h-[calc(100vh-140px)] bg-zinc-950 text-white animate-fade-in rounded-3xl overflow-hidden border-2 border-red-900/40 shadow-2xl"
+      }>
         {/* Top Header */}
-        <div className="p-4 bg-zinc-900 border-b border-white/10 flex items-center justify-between shadow-md">
-          <div className="flex items-center space-x-3">
+        <div className="p-3 sm:p-4 bg-zinc-900/95 backdrop-blur-md border-b border-white/10 flex items-center justify-between shadow-md sticky top-0 z-20">
+          <div className="flex items-center space-x-2.5 sm:space-x-3 min-w-0">
             <button
               onClick={handleLeaveAnonRoom}
-              className="w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-colors"
+              className="w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-colors active:scale-95 shrink-0"
               title="Keluar Chat"
             >
               <i className="fas fa-arrow-left text-sm"></i>
             </button>
             <div 
-              className={`relative ${isPartnerRevealed ? 'cursor-pointer' : ''}`}
+              className={`relative shrink-0 ${isPartnerRevealed ? 'cursor-pointer' : ''}`}
               onClick={() => {
                 if (isPartnerRevealed && partnerUid) {
                   onUserClick(partnerUid);
@@ -835,7 +1129,7 @@ const Chat: React.FC<ChatProps> = ({
               <img
                 src={displayPhoto}
                 alt={displayName}
-                className="w-11 h-11 rounded-full border-2 border-red-600 object-cover shadow-lg"
+                className="w-10 h-10 sm:w-11 sm:h-11 rounded-full border-2 border-red-600 object-cover shadow-lg"
               />
               {!isPartnerRevealed && (
                 <div className="absolute -bottom-1 -right-1 bg-red-600 text-white rounded-full p-1 text-[8px]">
@@ -843,9 +1137,9 @@ const Chat: React.FC<ChatProps> = ({
                 </div>
               )}
             </div>
-            <div>
+            <div className="min-w-0">
               <h3 
-                className={`font-black text-sm uppercase tracking-tight ${isPartnerRevealed ? 'hover:underline cursor-pointer text-white' : 'text-red-400'}`}
+                className={`font-black text-sm uppercase tracking-tight truncate ${isPartnerRevealed ? 'hover:underline cursor-pointer text-white' : 'text-red-400'}`}
                 onClick={() => {
                   if (isPartnerRevealed && partnerUid) {
                     onUserClick(partnerUid);
@@ -854,159 +1148,273 @@ const Chat: React.FC<ChatProps> = ({
               >
                 {displayName}
               </h3>
-              <p className="text-[9px] font-bold uppercase tracking-widest text-zinc-400">
+              <p className="text-[9px] font-bold uppercase tracking-widest text-zinc-400 truncate">
                 {isPartnerRevealed ? '🔓 Profil Terungkap' : '🕵️ Identitas Disembunyikan'}
               </p>
             </div>
           </div>
 
-          <div className="flex items-center space-x-2">
+          <div className="flex items-center space-x-1.5 sm:space-x-2 shrink-0">
             {!isPartnerRevealed && partnerUid && (
               <button
                 onClick={() => handleFollowAndReveal(partnerUid)}
                 className="bg-red-600 hover:bg-red-500 text-white text-[10px] font-black uppercase px-3 py-1.5 rounded-full shadow-lg flex items-center space-x-1.5 animate-pulse active:scale-95 transition-all"
               >
                 <i className="fas fa-user-plus text-[9px]"></i>
-                <span>Follow & Ungkap</span>
+                <span className="hidden sm:inline">Follow & Ungkap</span>
               </button>
             )}
             <button
               onClick={handleNextMatch}
-              className="bg-zinc-800 hover:bg-zinc-700 text-white text-[10px] font-black uppercase px-3 py-1.5 rounded-full border border-white/10 transition-all flex items-center space-x-1"
+              className="bg-zinc-800 hover:bg-zinc-700 text-white text-[10px] font-black uppercase px-2.5 sm:px-3 py-1.5 rounded-full border border-white/10 transition-all flex items-center space-x-1 active:scale-95"
               title="Cari Partner Lain"
             >
-              <i className="fas fa-rotate"></i>
+              <i className="fas fa-rotate text-xs"></i>
               <span className="hidden sm:inline">Cari Lain</span>
+            </button>
+            <button
+              onClick={() => setIsFullScreen(!isFullScreen)}
+              className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white flex items-center justify-center transition-colors text-xs"
+              title={isFullScreen ? "Kecilkan Layar" : "Layar Penuh"}
+            >
+              <i className={`fas ${isFullScreen ? 'fa-compress' : 'fa-expand'}`}></i>
             </button>
           </div>
         </div>
 
         {/* Message List */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-zinc-950/90 scroll-smooth">
-          <div className="text-center py-3 px-4 bg-zinc-900/80 border border-white/10 rounded-2xl text-[11px] font-bold text-zinc-400 max-w-sm mx-auto space-y-1 shadow-inner">
-            <p className="text-red-400 uppercase font-black tracking-wider">🔒 Obrolan Anonim Aktif</p>
-            <p>Saling berkirim pesan secara bebas! Tekan <span className="text-white font-black">Follow & Ungkap</span> jika Anda ingin saling melihat foto dan nama profil asli.</p>
-          </div>
+        <div className="flex-1 overflow-y-auto p-3 sm:p-6 space-y-4 bg-zinc-950/90 scroll-smooth">
+          <div className="max-w-4xl mx-auto w-full flex-1 flex flex-col justify-end min-h-full space-y-4">
+            <div className="text-center py-3 px-4 bg-zinc-900/80 border border-white/10 rounded-2xl text-[11px] font-bold text-zinc-400 max-w-sm mx-auto space-y-1 shadow-inner">
+              <p className="text-red-400 uppercase font-black tracking-wider">🔒 Obrolan Anonim Aktif</p>
+              <p>Saling berkirim pesan secara bebas! Tekan <span className="text-white font-black">Follow & Ungkap</span> jika Anda ingin saling melihat foto dan nama profil asli.</p>
+            </div>
 
-          {anonMessages.map((m) => {
-            const isMe = m.senderId === currentUser?.id;
-            return (
-              <div key={m.id} className={`flex flex-col group relative ${isMe ? 'items-end' : 'items-start animate-fade-in'}`}>
-                <span className="text-[8px] font-black uppercase tracking-widest mb-1 px-1 text-zinc-500">
-                  {isMe ? 'Anda' : displayName}
-                </span>
-                <div className="flex items-center space-x-1.5 max-w-[85%]">
-                  {isMe && (
-                    <button
-                      onClick={(e) => handleDeleteAnonMessageForMe(m.id, e)}
-                      className="opacity-0 group-hover:opacity-100 transition-opacity text-zinc-500 hover:text-red-400 p-1 text-[11px]"
-                      title="Hapus untuk Saya"
-                    >
-                      <i className="fas fa-trash-can"></i>
-                    </button>
-                  )}
-                  <div className={`p-4 rounded-3xl text-sm font-medium shadow-md ${
-                    isMe 
-                      ? 'bg-red-600 text-white rounded-br-none' 
-                      : 'bg-zinc-800 border border-white/10 text-white rounded-bl-none'
-                  }`}>
-                    {m.text}
+            {anonMessages.map((m) => {
+              const isMe = m.senderId === currentUser?.id;
+              return (
+                <div key={m.id} className={`flex flex-col group relative ${isMe ? 'items-end' : 'items-start animate-fade-in'}`}>
+                  <span className="text-[8px] font-black uppercase tracking-widest mb-1 px-1 text-zinc-500">
+                    {isMe ? 'Anda' : displayName}
+                  </span>
+                  <div className="flex items-center space-x-1.5 max-w-[85%] sm:max-w-lg">
+                    {isMe && (
+                      <button
+                        onClick={(e) => handleDeleteAnonMessageForMe(m.id, e)}
+                        className="opacity-0 group-hover:opacity-100 transition-opacity text-zinc-500 hover:text-red-400 p-1 text-[11px]"
+                        title="Hapus untuk Saya"
+                      >
+                        <i className="fas fa-trash-can"></i>
+                      </button>
+                    )}
+                    <div className={`p-3.5 sm:p-4 rounded-3xl text-sm font-medium shadow-md whitespace-pre-wrap break-words leading-relaxed ${
+                      isMe 
+                        ? 'bg-red-600 text-white rounded-br-none' 
+                        : 'bg-zinc-800 border border-white/10 text-white rounded-bl-none'
+                    }`}>
+                      {m.text}
+                    </div>
+                    {!isMe && (
+                      <button
+                        onClick={(e) => handleDeleteAnonMessageForMe(m.id, e)}
+                        className="opacity-0 group-hover:opacity-100 transition-opacity text-zinc-500 hover:text-red-400 p-1 text-[11px]"
+                        title="Hapus untuk Saya"
+                      >
+                        <i className="fas fa-trash-can"></i>
+                      </button>
+                    )}
                   </div>
-                  {!isMe && (
-                    <button
-                      onClick={(e) => handleDeleteAnonMessageForMe(m.id, e)}
-                      className="opacity-0 group-hover:opacity-100 transition-opacity text-zinc-500 hover:text-red-400 p-1 text-[11px]"
-                      title="Hapus untuk Saya"
-                    >
-                      <i className="fas fa-trash-can"></i>
-                    </button>
-                  )}
                 </div>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
         </div>
 
         {/* Bottom Input */}
-        <form onSubmit={handleSendAnonMessage} className="p-3 bg-zinc-900 border-t border-white/10 flex items-center space-x-2">
-          <input
-            type="text"
-            value={anonInputMsg}
-            onChange={(e) => setAnonInputMsg(e.target.value)}
-            placeholder="Tulis pesan rahasia anonim..."
-            className="flex-1 bg-zinc-800 border border-white/10 text-white rounded-full px-5 py-3 text-xs focus:outline-none focus:border-red-500 transition-all placeholder:text-zinc-500"
-          />
-          <button
-            type="submit"
-            disabled={!anonInputMsg.trim()}
-            className="w-11 h-11 bg-red-600 hover:bg-red-500 text-white rounded-full flex items-center justify-center transition-all shadow-lg disabled:opacity-30 active:scale-95"
-          >
-            <i className="fas fa-paper-plane text-xs"></i>
-          </button>
-        </form>
+        <div className="p-3 sm:p-4 bg-zinc-900 border-t border-white/10 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-lg">
+          <form onSubmit={handleSendAnonMessage} className="max-w-4xl mx-auto w-full flex items-center space-x-2">
+            <div className="flex-1 min-w-0 flex items-center bg-zinc-800 border border-white/10 rounded-2xl sm:rounded-3xl px-4 py-2 focus-within:border-red-500 transition-all">
+              <textarea
+                ref={anonTextareaRef}
+                rows={1}
+                value={anonInputMsg}
+                onChange={(e) => setAnonInputMsg(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey) {
+                    e.preventDefault();
+                    handleSendAnonMessage(e);
+                  }
+                }}
+                placeholder="Tulis pesan rahasia anonim... (Shift+Enter baris baru)"
+                className="w-full bg-transparent text-white text-xs sm:text-sm focus:outline-none resize-none leading-relaxed max-h-24 placeholder:text-zinc-500 py-1"
+                style={{ minHeight: '28px' }}
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={!anonInputMsg.trim()}
+              className="w-11 h-11 bg-red-600 hover:bg-red-500 text-white rounded-full flex items-center justify-center transition-all shadow-lg disabled:opacity-30 active:scale-95 shrink-0"
+              title="Kirim Pesan Anonim"
+            >
+              <i className="fas fa-paper-plane text-xs"></i>
+            </button>
+          </form>
+        </div>
       </div>
     );
   }
 
   if (isCreatingGroup) {
+    const followingUserIds = currentUser?.following || [];
+    // User can invite mutual followers or anyone they follow
+    const eligibleUsers = users.filter(u => 
+      u.id !== currentUser?.id && 
+      (followingUserIds.includes(u.id) || (currentUser?.followers || []).includes(u.id) || isMutual(u.id))
+    );
+
+    const filteredUsers = eligibleUsers.filter(u => {
+      if (!groupMemberSearchQuery.trim()) return true;
+      const q = groupMemberSearchQuery.toLowerCase();
+      return u.name.toLowerCase().includes(q) || (u.email && u.email.toLowerCase().includes(q));
+    });
+
     return (
-      <div className="p-4 flex flex-col h-full bg-white animate-fade-in">
-        <div className="flex items-center mb-6">
-          <button onClick={() => setIsCreatingGroup(false)} className="mr-4 text-black w-10 h-10 rounded-full hover:bg-gray-100 flex items-center justify-center transition-colors">
-            <i className="fas fa-arrow-left"></i>
-          </button>
-          <h2 className="text-xl font-black uppercase tracking-tighter">New Collective</h2>
-        </div>
-
-        <div className="space-y-4 mb-6">
-          <label className="text-[10px] font-black uppercase tracking-widest ml-2 opacity-50">Collective Name</label>
-          <input 
-            type="text" 
-            placeholder="Name your Collective..." 
-            value={groupName}
-            onChange={e => setGroupName(e.target.value)}
-            className="w-full p-4 border-2 border-black rounded-2xl font-bold focus:outline-none focus:ring-1 focus:ring-black transition-all"
-          />
-        </div>
-
-        <p className="text-[10px] font-black uppercase tracking-widest mb-4 opacity-40">Add Mutual Orbit Members ({mutualFollowers.length})</p>
-        
-        <div className="flex-1 overflow-y-auto space-y-2 mb-4 pr-1">
-          {mutualFollowers.length === 0 ? (
-            <div className="text-center py-10 text-gray-400 italic text-sm px-6">
-              You can only create groups with people who follow you back.
-            </div>
-          ) : (
-            mutualFollowers.map(u => (
-              <div 
-                key={u.id} 
-                onClick={() => toggleParticipantSelection(u.id)}
-                className={`flex items-center p-3 rounded-2xl border transition-all cursor-pointer ${
-                  selectedForGroup.includes(u.id) ? 'border-black bg-black text-white shadow-md' : 'border-black/5 bg-gray-50'
-                }`}
+      <div className={
+        isFullScreen
+          ? "fixed inset-0 z-[60] bg-white flex flex-col h-[100dvh] w-full overflow-y-auto p-4 sm:p-6 pb-24 animate-fade-in select-text"
+          : "p-4 flex flex-col h-full bg-white animate-fade-in"
+      }>
+        <div className="max-w-xl mx-auto w-full flex flex-col flex-1">
+          <div className="flex items-center justify-between mb-6">
+            <div className="flex items-center space-x-3">
+              <button 
+                onClick={() => {
+                  setIsCreatingGroup(false);
+                  setGroupMemberSearchQuery('');
+                  setSelectedForGroup([]);
+                }} 
+                className="text-black w-10 h-10 rounded-full hover:bg-gray-100 flex items-center justify-center transition-colors"
               >
-                <img src={u.photoURL} className="w-10 h-10 rounded-full mr-3 border border-black/10" alt={u.name} />
-                <div className="flex-1">
-                  <p className="font-bold text-sm uppercase">{u.name}</p>
-                </div>
-                <div className={`w-5 h-5 rounded-full border flex items-center justify-center ${
-                  selectedForGroup.includes(u.id) ? 'border-white bg-white' : 'border-black/20'
-                }`}>
-                  {selectedForGroup.includes(u.id) && <i className="fas fa-check text-[10px] text-black"></i>}
-                </div>
+                <i className="fas fa-arrow-left"></i>
+              </button>
+              <div>
+                <h2 className="text-xl font-black uppercase tracking-tighter">Buat Grup Baru</h2>
+                <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">New Collective Space</p>
               </div>
-            ))
-          )}
-        </div>
+            </div>
+          </div>
 
-        <button 
-          onClick={handleCreateGroup}
-          disabled={!groupName.trim() || selectedForGroup.length === 0}
-          className="w-full bg-black text-white p-4 rounded-2xl font-black uppercase tracking-widest disabled:opacity-20 transition-all shadow-lg active:scale-95"
-        >
-          Assemble
-        </button>
-        {renderConfirmModal()}
+          <div className="space-y-2 mb-5">
+            <label className="text-[10px] font-black uppercase tracking-widest ml-1 text-gray-700">Nama Grup Collective</label>
+            <input 
+              type="text" 
+              placeholder="Contoh: Orbit Squad, Diskusi Kreatif..." 
+              value={groupName}
+              onChange={e => setGroupName(e.target.value)}
+              className="w-full p-4 border-2 border-black rounded-2xl font-bold focus:outline-none focus:ring-2 focus:ring-black/10 transition-all text-sm"
+            />
+          </div>
+
+          {/* Search Box for Followed Members */}
+          <div className="mb-4">
+            <div className="flex items-center justify-between mb-2 px-1">
+              <label className="text-[10px] font-black uppercase tracking-widest text-gray-700">
+                Pilih Anggota yang Di-follow ({selectedForGroup.length} Dipilih)
+              </label>
+              {selectedForGroup.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedForGroup([])}
+                  className="text-[10px] font-black text-red-500 hover:underline uppercase"
+                >
+                  Batal Pilih Semua
+                </button>
+              )}
+            </div>
+
+            <div className="relative">
+              <i className="fas fa-search absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400 text-xs"></i>
+              <input
+                type="text"
+                placeholder="Cari nama teman yang sudah di-follow..."
+                value={groupMemberSearchQuery}
+                onChange={(e) => setGroupMemberSearchQuery(e.target.value)}
+                className="w-full bg-gray-50 border border-gray-300 pl-9 pr-9 py-2.5 rounded-2xl text-xs font-bold focus:outline-none focus:border-black focus:bg-white transition-all shadow-xs"
+              />
+              {groupMemberSearchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setGroupMemberSearchQuery('')}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-black text-xs"
+                >
+                  <i className="fas fa-xmark"></i>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Invitation Notice / Approval Rule Info */}
+          <div className="mb-4 p-3 bg-purple-50 border border-purple-200 rounded-2xl flex items-center space-x-3 text-purple-900">
+            <div className="w-8 h-8 rounded-full bg-purple-200 text-purple-700 flex items-center justify-center shrink-0 text-xs font-bold">
+              <i className="fas fa-bell"></i>
+            </div>
+            <p className="text-[11px] font-medium leading-snug">
+              <span className="font-extrabold">Sistem Undangan:</span> Anggota yang dipilih akan menerima notifikasi undangan di akun mereka dan baru akan bergabung secara resmi setelah menekan tombol <span className="font-bold">Terima</span>.
+            </p>
+          </div>
+          
+          <div className="flex-1 overflow-y-auto space-y-2 mb-4 pr-1 min-h-[180px]">
+            {filteredUsers.length === 0 ? (
+              <div className="text-center py-10 text-gray-400 italic text-xs px-6">
+                {groupMemberSearchQuery ? `Tidak ada teman yang cocok dengan "${groupMemberSearchQuery}".` : 'Belum ada teman yang di-follow untuk ditambahkan.'}
+              </div>
+            ) : (
+              filteredUsers.map(u => {
+                const isSelected = selectedForGroup.includes(u.id);
+                const isUserOnlineNow = isUserOnline(u.id);
+                return (
+                  <div 
+                    key={u.id} 
+                    onClick={() => toggleParticipantSelection(u.id)}
+                    className={`flex items-center p-3 rounded-2xl border transition-all cursor-pointer select-none ${
+                      isSelected ? 'border-black bg-black text-white shadow-md' : 'border-black/5 bg-gray-50 hover:bg-gray-100/80 hover:border-black/20'
+                    }`}
+                  >
+                    <div className="relative shrink-0 mr-3">
+                      <img src={u.photoURL} className="w-10 h-10 rounded-full border border-black/10 object-cover" alt={u.name} />
+                      {isUserOnlineNow ? (
+                        <span className="absolute bottom-0 right-0 w-3 h-3 bg-emerald-500 rounded-full border-2 border-white ring-1 ring-emerald-400 animate-pulse" title="Online"></span>
+                      ) : (
+                        <span className="absolute bottom-0 right-0 w-3 h-3 bg-neutral-300 rounded-full border-2 border-white" title="Offline"></span>
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className={`font-bold text-xs sm:text-sm uppercase truncate ${isSelected ? 'text-white' : 'text-gray-900'}`}>{u.name}</p>
+                      <p className={`text-[10px] font-medium truncate ${isSelected ? 'text-gray-300' : 'text-gray-400'}`}>
+                        {isUserOnlineNow ? 'Online • Aktif' : 'Offline'}
+                      </p>
+                    </div>
+                    <div className={`w-6 h-6 rounded-full border flex items-center justify-center transition-all ${
+                      isSelected ? 'border-white bg-white text-black' : 'border-black/20 bg-white text-transparent'
+                    }`}>
+                      <i className="fas fa-check text-[11px]"></i>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          <button 
+            onClick={handleCreateGroup}
+            disabled={!groupName.trim() || selectedForGroup.length === 0}
+            className="w-full bg-black text-white p-4 rounded-2xl font-black uppercase tracking-widest disabled:opacity-20 hover:opacity-90 transition-all shadow-lg active:scale-95 flex items-center justify-center space-x-2"
+          >
+            <i className="fas fa-paper-plane text-xs"></i>
+            <span>Buat Grup & Kirim Undangan ({selectedForGroup.length})</span>
+          </button>
+          {renderConfirmModal()}
+        </div>
       </div>
     );
   }
@@ -1014,73 +1422,115 @@ const Chat: React.FC<ChatProps> = ({
   if (isViewingGroupSettings && selectedRecipient?.type === 'group') {
     const group = selectedRecipient.data as Group;
     const isAdmin = currentUser && group.admins.includes(currentUser.id);
-    const mutualNonMembers = mutualFollowers.filter(u => !group.participants.includes(u.id));
+    const followingUserIds = currentUser?.following || [];
+    
+    // Eligible friends that currentUser follows
+    const eligibleFriends = users.filter(u => 
+      u.id !== currentUser?.id && 
+      (followingUserIds.includes(u.id) || (currentUser?.followers || []).includes(u.id) || isMutual(u.id))
+    );
+
+    const pendingUserIds = group.pendingInvites ? Object.keys(group.pendingInvites) : [];
+    
+    // Friends who can be invited (not yet a participant and not currently in pending invites)
+    const inviteableNonMembers = eligibleFriends.filter(u => !group.participants.includes(u.id) && !pendingUserIds.includes(u.id));
+    const filteredInviteables = inviteableNonMembers.filter(u => {
+      if (!addMemberSearch.trim()) return true;
+      const q = addMemberSearch.toLowerCase();
+      return u.name.toLowerCase().includes(q) || (u.email && u.email.toLowerCase().includes(q));
+    });
 
     return (
-      <div className="p-4 flex flex-col h-full bg-white overflow-y-auto pb-20 animate-fade-in relative">
-        <div className="flex items-center mb-8">
-          <button onClick={() => setIsViewingGroupSettings(false)} className="mr-4 w-10 h-10 flex items-center justify-center rounded-full hover:bg-gray-100 transition-colors">
-            <i className="fas fa-arrow-left"></i>
-          </button>
-          <h2 className="text-xl font-black uppercase tracking-tighter">Collective Management</h2>
-        </div>
+      <div className={
+        isFullScreen
+          ? "fixed inset-0 z-[60] bg-white flex flex-col h-[100dvh] w-full overflow-y-auto p-4 sm:p-6 pb-24 animate-fade-in select-text"
+          : "p-4 flex flex-col h-full bg-white overflow-y-auto pb-20 animate-fade-in relative"
+      }>
+        <div className="max-w-xl mx-auto w-full">
+          <div className="flex items-center mb-8">
+            <button onClick={() => setIsViewingGroupSettings(false)} className="mr-4 w-10 h-10 flex items-center justify-center rounded-full hover:bg-gray-100 transition-colors">
+              <i className="fas fa-arrow-left"></i>
+            </button>
+            <h2 className="text-xl font-black uppercase tracking-tighter">Collective Management</h2>
+          </div>
 
-        <div className="flex flex-col items-center mb-10">
-          <div className="relative group mb-6">
-            {group.photoURL ? (
-              <img src={group.photoURL} className="w-32 h-32 rounded-full border-4 border-black object-cover shadow-xl" alt={group.name} />
-            ) : (
-              <div className="w-32 h-32 rounded-full bg-black text-white flex items-center justify-center text-4xl font-black border-4 border-black shadow-xl">
-                {group.name.substring(0, 1).toUpperCase()}
+          <div className="flex flex-col items-center mb-10">
+            <div className="relative group mb-6">
+              {group.photoURL ? (
+                <img src={group.photoURL} className="w-32 h-32 rounded-full border-4 border-black object-cover shadow-xl" alt={group.name} />
+              ) : (
+                <div className="w-32 h-32 rounded-full bg-black text-white flex items-center justify-center text-4xl font-black border-4 border-black shadow-xl">
+                  {group.name.substring(0, 1).toUpperCase()}
+                </div>
+              )}
+              {isAdmin && (
+                <label className="absolute inset-0 flex items-center justify-center bg-black/50 rounded-full opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer backdrop-blur-sm">
+                  <i className="fas fa-camera text-white text-2xl"></i>
+                  <input type="file" className="hidden" accept="image/*" onChange={(e) => handleGroupPhotoChange(group.id, e)} />
+                </label>
+              )}
+            </div>
+
+            {isAdmin ? (
+              <div className="w-full space-y-6 px-4">
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black uppercase tracking-[0.2em] opacity-40 ml-1">Group Name</label>
+                  <input 
+                    type="text" 
+                    defaultValue={group.name} 
+                    onBlur={(e) => updateGroupInfo(group.id, { name: e.target.value })}
+                    className="w-full p-4 border-2 border-black rounded-2xl font-bold uppercase text-center focus:outline-none focus:ring-1 focus:ring-black"
+                  />
+                </div>
               </div>
-            )}
-            {isAdmin && (
-              <label className="absolute inset-0 flex items-center justify-center bg-black/50 rounded-full opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer backdrop-blur-sm">
-                <i className="fas fa-camera text-white text-2xl"></i>
-                <input type="file" className="hidden" accept="image/*" onChange={(e) => handleGroupPhotoChange(group.id, e)} />
-              </label>
+            ) : (
+              <h3 className="text-2xl font-black uppercase tracking-tight">{group.name}</h3>
             )}
           </div>
 
-          {isAdmin ? (
-            <div className="w-full space-y-6 px-4">
-              <div className="space-y-1">
-                <label className="text-[10px] font-black uppercase tracking-[0.2em] opacity-40 ml-1">Group Name</label>
-                <input 
-                  type="text" 
-                  defaultValue={group.name} 
-                  onBlur={(e) => updateGroupInfo(group.id, { name: e.target.value })}
-                  className="w-full p-4 border-2 border-black rounded-2xl font-bold uppercase text-center focus:outline-none focus:ring-1 focus:ring-black"
-                />
-              </div>
-            </div>
-          ) : (
-            <h3 className="text-2xl font-black uppercase tracking-tight">{group.name}</h3>
-          )}
-        </div>
-
+        {/* Section: Anggota Aktif */}
         <div className="mb-8">
-          <h4 className="text-[10px] font-black uppercase tracking-[0.2em] opacity-40 mb-4 px-2">Members ({group.participants.length})</h4>
+          <div className="flex items-center justify-between mb-4 px-2">
+            <h4 className="text-[10px] font-black uppercase tracking-[0.2em] opacity-50">
+              Anggota Aktif ({group.participants.length})
+            </h4>
+            <span className="text-[9px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+              {group.participants.filter(pid => isUserOnline(pid)).length} Online
+            </span>
+          </div>
           <div className="space-y-2">
             {group.participants.map(pid => {
               const u = users.find(user => user.id === pid);
               if (!u) return null;
               const isUserAdmin = group.admins.includes(u.id);
+              const isMemberOnline = isUserOnline(u.id);
 
               return (
                 <div key={u.id} className="flex items-center p-3 bg-gray-50 rounded-2xl border border-transparent hover:border-black transition-all">
-                  <img src={u.photoURL} className="w-10 h-10 rounded-full mr-3 border border-black/10 object-cover" alt={u.name} />
+                  <div className="relative shrink-0 mr-3">
+                    <img src={u.photoURL} className="w-10 h-10 rounded-full border border-black/10 object-cover" alt={u.name} />
+                    {isMemberOnline ? (
+                      <span className="absolute bottom-0 right-0 w-3 h-3 bg-emerald-500 rounded-full border-2 border-white ring-1 ring-emerald-400 animate-pulse" title="Online"></span>
+                    ) : (
+                      <span className="absolute bottom-0 right-0 w-3 h-3 bg-neutral-300 rounded-full border-2 border-white" title="Offline"></span>
+                    )}
+                  </div>
                   <div className="flex-1 min-w-0">
-                    <p className="font-bold text-xs uppercase truncate">{u.name}</p>
-                    {isUserAdmin && <span className="text-[8px] font-black uppercase tracking-widest text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">Admin</span>}
+                    <div className="flex items-center space-x-1.5">
+                      <p className="font-bold text-xs uppercase truncate">{u.name}</p>
+                      {isUserAdmin && <span className="text-[8px] font-black uppercase tracking-widest text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">Admin</span>}
+                    </div>
+                    <p className="text-[9px] text-neutral-400 font-medium truncate">
+                      {isMemberOnline ? 'Online • Aktif' : 'Offline'}
+                    </p>
                   </div>
                   {isAdmin && u.id !== currentUser?.id && (
                     <div className="flex space-x-1">
                       {!isUserAdmin && (
                         <button 
                           onClick={() => handleRemoveMember(group.id, u.id)} 
-                          className="w-8 h-8 flex items-center justify-center text-red-500 hover:bg-red-50 bg-white border border-red-500/20 rounded-full transition-all"
-                          title="Kick Member"
+                          className="w-8 h-8 flex items-center justify-center text-red-500 hover:bg-red-50 bg-white border border-red-500/20 rounded-full transition-all active:scale-95"
+                          title="Keluarkan dari Grup"
                         >
                           <i className="fas fa-user-xmark text-xs"></i>
                         </button>
@@ -1093,25 +1543,118 @@ const Chat: React.FC<ChatProps> = ({
           </div>
         </div>
 
+        {/* Section: Undangan Menunggu Konfirmasi / Persetujuan */}
+        {pendingUserIds.length > 0 && (
+          <div className="mb-8">
+            <div className="flex items-center justify-between mb-4 px-2">
+              <h4 className="text-[10px] font-black uppercase tracking-[0.2em] text-purple-800">
+                Undangan Menunggu Persetujuan ({pendingUserIds.length})
+              </h4>
+              <span className="text-[9px] font-bold text-purple-700 bg-purple-50 px-2 py-0.5 rounded-full border border-purple-200">
+                Pending
+              </span>
+            </div>
+            <div className="space-y-2">
+              {pendingUserIds.map(pid => {
+                const u = users.find(user => user.id === pid);
+                if (!u) return null;
+                const isMemberOnline = isUserOnline(u.id);
+
+                return (
+                  <div key={u.id} className="flex items-center p-3 bg-purple-50/40 rounded-2xl border border-purple-200/60 transition-all">
+                    <div className="relative shrink-0 mr-3">
+                      <img src={u.photoURL} className="w-10 h-10 rounded-full border border-purple-300 object-cover opacity-80" alt={u.name} />
+                      {isMemberOnline ? (
+                        <span className="absolute bottom-0 right-0 w-3 h-3 bg-emerald-500 rounded-full border-2 border-white ring-1 ring-emerald-400" title="Online"></span>
+                      ) : (
+                        <span className="absolute bottom-0 right-0 w-3 h-3 bg-neutral-300 rounded-full border-2 border-white" title="Offline"></span>
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-bold text-xs uppercase truncate text-neutral-800">{u.name}</p>
+                      <span className="inline-flex items-center space-x-1 text-[8px] font-black uppercase tracking-wider text-purple-700 bg-purple-100 px-2 py-0.5 rounded-md mt-0.5">
+                        <i className="fas fa-clock text-[7px]"></i>
+                        <span>Menunggu Konfirmasi</span>
+                      </span>
+                    </div>
+                    {isAdmin && (
+                      <button 
+                        onClick={() => handleCancelInvite(group.id, u.id)} 
+                        className="px-3 py-1.5 bg-white text-red-600 hover:bg-red-50 border border-red-200 rounded-xl text-[10px] font-bold uppercase transition-all active:scale-95 flex items-center space-x-1"
+                        title="Batalkan Undangan"
+                      >
+                        <i className="fas fa-xmark text-xs"></i>
+                        <span>Batal</span>
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Section: Tambah Anggota (Cari Teman yang Di-follow & Kirim Undangan) */}
         {isAdmin && (
           <div className="mb-10">
-            <h4 className="text-[10px] font-black uppercase tracking-[0.2em] opacity-40 mb-4 px-2">Add Mutual Orbit Members</h4>
-            {mutualNonMembers.length === 0 ? (
-              <p className="text-center text-[10px] text-gray-400 uppercase font-bold py-4">No more mutual orbit members to add.</p>
+            <h4 className="text-[10px] font-black uppercase tracking-[0.2em] opacity-50 mb-3 px-2">
+              Undang Teman yang Di-follow
+            </h4>
+
+            {/* Search Input for non-member friends */}
+            <div className="relative mb-3">
+              <i className="fas fa-search absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400 text-xs"></i>
+              <input
+                type="text"
+                placeholder="Cari teman yang sudah di-follow..."
+                value={addMemberSearch}
+                onChange={(e) => setAddMemberSearch(e.target.value)}
+                className="w-full bg-gray-50 border border-gray-300 pl-9 pr-9 py-2 rounded-2xl text-xs font-bold focus:outline-none focus:border-black focus:bg-white shadow-xs"
+              />
+              {addMemberSearch && (
+                <button
+                  type="button"
+                  onClick={() => setAddMemberSearch('')}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-black text-xs"
+                >
+                  <i className="fas fa-xmark"></i>
+                </button>
+              )}
+            </div>
+
+            {filteredInviteables.length === 0 ? (
+              <p className="text-center text-[10px] text-gray-400 uppercase font-bold py-4">
+                {addMemberSearch ? `Tidak ada hasil pencarian "${addMemberSearch}".` : 'Semua teman yang Anda follow sudah berada di dalam grup atau telah diundang.'}
+              </p>
             ) : (
               <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
-                {mutualNonMembers.map(u => (
-                  <div key={u.id} className="flex items-center p-3 bg-gray-50 rounded-2xl border border-transparent hover:border-black transition-all">
-                    <img src={u.photoURL} className="w-9 h-9 rounded-full mr-3 border border-black/10" alt={u.name} />
-                    <p className="flex-1 text-xs font-bold uppercase">{u.name}</p>
-                    <button 
-                      onClick={() => handleAddMember(group.id, u.id)} 
-                      className="w-8 h-8 flex items-center justify-center border-2 border-black rounded-full hover:bg-black hover:text-white transition-all active:scale-90"
-                    >
-                      <i className="fas fa-plus text-xs"></i>
-                    </button>
-                  </div>
-                ))}
+                {filteredInviteables.map(u => {
+                  const isUserOnlineNow = isUserOnline(u.id);
+                  return (
+                    <div key={u.id} className="flex items-center p-3 bg-gray-50 rounded-2xl border border-transparent hover:border-black transition-all">
+                      <div className="relative shrink-0 mr-3">
+                        <img src={u.photoURL} className="w-9 h-9 rounded-full border border-black/10 object-cover" alt={u.name} />
+                        {isUserOnlineNow && (
+                          <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-emerald-500 rounded-full border-2 border-white ring-1 ring-emerald-400 animate-pulse"></span>
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-bold uppercase truncate">{u.name}</p>
+                        <p className="text-[9px] text-gray-400 font-medium truncate">
+                          {isUserOnlineNow ? 'Online • Aktif' : 'Offline'}
+                        </p>
+                      </div>
+                      <button 
+                        onClick={() => handleInviteMember(group.id, u.id, group.name, group.photoURL)} 
+                        className="px-3.5 py-1.5 bg-black hover:bg-neutral-800 text-white rounded-xl text-[10px] font-black uppercase tracking-wider flex items-center space-x-1.5 transition-all active:scale-95 shadow-xs"
+                        title="Kirim Undangan"
+                      >
+                        <i className="fas fa-paper-plane text-[9px]"></i>
+                        <span>Undang</span>
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -1121,16 +1664,17 @@ const Chat: React.FC<ChatProps> = ({
           onClick={() => handleLeaveGroup(group.id)}
           className="w-full py-4 border-2 border-red-500 text-red-500 rounded-2xl font-black uppercase tracking-[0.2em] hover:bg-red-500 hover:text-white transition-all shadow-md active:scale-95 mb-10"
         >
-          Leave Collective
+          Keluar dari Grup
         </button>
         {renderConfirmModal()}
+        </div>
       </div>
     );
   }
 
   if (!selectedRecipient) {
     return (
-      <div className="p-4 h-full flex flex-col animate-fade-in relative">
+      <div className="p-3 sm:p-4 h-full flex flex-col animate-fade-in relative max-w-2xl mx-auto w-full">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-3xl font-black uppercase tracking-tighter">Echoes</h2>
           <button 
@@ -1172,23 +1716,8 @@ const Chat: React.FC<ChatProps> = ({
           </div>
         )}
 
-        {/* 5 Tabs: AI Bot, Direct, Obrolan Toko, Collectives, Anonymous Match */}
+        {/* 4 Tabs: Direct, Obrolan Toko, Collectives, Anonymous Match */}
         <div className="flex border-b-2 border-black/5 mb-6 overflow-x-auto scrollbar-none">
-          <button 
-            onClick={() => setActiveTab('hengkur_ai')}
-            className={`flex-1 min-w-[110px] py-3 text-[10px] font-black uppercase tracking-[0.1em] transition-all border-b-2 flex items-center justify-center space-x-1.5 ${
-              activeTab === 'hengkur_ai' ? 'border-emerald-500 text-emerald-600 font-extrabold' : 'border-transparent text-gray-400 hover:text-gray-700'
-            }`}
-          >
-            {botAvatar ? (
-              <img src={botAvatar} alt={botName} className="w-4 h-4 rounded-full object-cover ring-1 ring-emerald-400" />
-            ) : (
-              <i className="fas fa-robot text-emerald-500 text-xs animate-pulse"></i>
-            )}
-            <span className="truncate max-w-[90px]">{botName}</span>
-            <span className="bg-emerald-100 text-emerald-700 text-[8px] font-black px-1.5 py-0.5 rounded-full">AI</span>
-          </button>
-
           <button 
             onClick={() => setActiveTab('direct')}
             className={`flex-1 min-w-[70px] py-3 text-[10px] font-black uppercase tracking-[0.1em] transition-all border-b-2 ${
@@ -1229,85 +1758,218 @@ const Chat: React.FC<ChatProps> = ({
         </div>
 
         <div className="space-y-4 flex-1 overflow-y-auto pr-1">
-          {activeTab === 'hengkur_ai' && (
-            <div className="h-full min-h-[460px] flex flex-col -mx-2 sm:mx-0">
-              <HengkurAIChat 
-                currentUser={currentUser} 
-                onBotNameChange={(name) => setBotName(name)}
-                onBotAvatarChange={(avatar) => setBotAvatar(avatar)}
-              />
-            </div>
-          )}
-
           {activeTab === 'direct' && (
             <div className="space-y-3">
-              {/* Pinned AI Bot Assistant Card */}
-              <div 
-                onClick={() => setActiveTab('hengkur_ai')}
-                className="flex items-center border-2 border-emerald-500/40 bg-gradient-to-r from-emerald-50/80 via-teal-50/40 to-white rounded-2xl hover:border-emerald-500 transition-all p-3.5 shadow-xs cursor-pointer group hover:scale-[1.01]"
-              >
-                <div className="relative mr-3.5 shrink-0">
-                  {botAvatar ? (
-                    <img 
-                      src={botAvatar} 
-                      alt={botName}
-                      className="w-12 h-12 rounded-2xl object-cover shadow-md ring-2 ring-emerald-400/60"
-                    />
-                  ) : (
-                    <div className="w-12 h-12 rounded-2xl bg-black text-white flex items-center justify-center shadow-md ring-2 ring-emerald-400/50">
-                      <i className="fas fa-robot text-lg text-emerald-400"></i>
-                    </div>
-                  )}
-                  <span className="absolute -bottom-1 -right-1 w-3.5 h-3.5 bg-emerald-500 border-2 border-white rounded-full flex items-center justify-center">
-                    <span className="w-1.5 h-1.5 bg-white rounded-full animate-ping"></span>
-                  </span>
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center space-x-1.5">
-                    <p className="font-black text-sm uppercase text-neutral-900 truncate">{botName}</p>
-                    <span className="bg-emerald-600 text-white text-[8px] font-black px-1.5 py-0.5 rounded-md flex items-center space-x-1 shrink-0">
-                      <i className="fas fa-sparkles text-[7px] text-yellow-300"></i>
-                      <span>ASISTEN AI</span>
-                    </span>
-                  </div>
-                  <p className="text-[11px] text-neutral-600 font-bold truncate mt-0.5">Tanya ide caption, musik, konten viral, coding, atau ngobrol...</p>
-                </div>
-                <div className="flex items-center space-x-1 pl-2 shrink-0">
-                  <span className="text-[10px] font-black text-emerald-600 bg-emerald-100 px-2 py-1 rounded-xl hidden sm:inline">Buka AI</span>
-                  <i className="fas fa-chevron-right text-neutral-400 group-hover:text-black group-hover:translate-x-0.5 transition-all text-xs"></i>
-                </div>
+              {/* SEARCH BAR FOR FINDING PEOPLE */}
+              <div className="relative">
+                <i className="fas fa-search absolute left-3.5 top-1/2 -translate-y-1/2 text-neutral-400 text-xs"></i>
+                <input
+                  type="text"
+                  placeholder="Cari orang / nama pengguna untuk mulai chat..."
+                  value={userSearchQuery}
+                  onChange={(e) => setUserSearchQuery(e.target.value)}
+                  className="w-full bg-white border border-neutral-200 pl-9 pr-8 py-2.5 rounded-2xl text-xs font-bold focus:outline-none focus:border-black shadow-xs"
+                />
+                {userSearchQuery && (
+                  <button
+                    onClick={() => setUserSearchQuery('')}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-black text-xs"
+                  >
+                    <i className="fas fa-xmark"></i>
+                  </button>
+                )}
               </div>
 
-              {mutualFollowers.length === 0 ? (
-                <div className="text-center py-16 text-gray-400 italic text-sm px-6">
-                  Direct whispers are only for mutual orbit members (who follow each other).
+              {/* CASE A: USER IS SEARCHING FOR PEOPLE */}
+              {userSearchQuery.trim() ? (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between px-1">
+                    <span className="text-[10px] font-black uppercase tracking-wider text-neutral-500">
+                      Hasil Pencarian Orang ({users.filter(u => u.id !== currentUser?.id && ((u.name || '').toLowerCase().includes(userSearchQuery.toLowerCase()) || (u.email || '').toLowerCase().includes(userSearchQuery.toLowerCase()))).length})
+                    </span>
+                  </div>
+
+                  {users.filter(u => u.id !== currentUser?.id && ((u.name || '').toLowerCase().includes(userSearchQuery.toLowerCase()) || (u.email || '').toLowerCase().includes(userSearchQuery.toLowerCase()))).length === 0 ? (
+                    <div className="text-center py-10 bg-white rounded-3xl border border-neutral-200/80 p-6 space-y-2">
+                      <div className="w-12 h-12 rounded-full bg-neutral-100 flex items-center justify-center text-neutral-400 text-lg mx-auto">
+                        <i className="fas fa-user-slash"></i>
+                      </div>
+                      <p className="text-xs font-bold text-neutral-800">Tidak ada pengguna ditemukan</p>
+                      <p className="text-[10px] text-neutral-500">Coba kata kunci nama atau username lain.</p>
+                    </div>
+                  ) : (
+                    users.filter(u => u.id !== currentUser?.id && ((u.name || '').toLowerCase().includes(userSearchQuery.toLowerCase()) || (u.email || '').toLowerCase().includes(userSearchQuery.toLowerCase()))).map(u => {
+                      const uOnline = isUserOnline(u.id);
+                      const isMutualUser = isMutual(u.id);
+                      const isFollowed = (currentUser?.following || []).includes(u.id);
+
+                      return (
+                        <div key={u.id} className="flex items-center border border-neutral-200/90 rounded-2xl hover:border-black transition-all group p-3 bg-white shadow-xs">
+                          <div className="relative shrink-0 mr-3">
+                            <img 
+                              src={u.photoURL} 
+                              className="w-11 h-11 rounded-full border border-neutral-200 bg-neutral-100 cursor-pointer object-cover shadow-xs" 
+                              alt={u.name} 
+                              onClick={() => onUserClick(u.id)}
+                            />
+                            {uOnline ? (
+                              <span className="absolute bottom-0 right-0 w-3 h-3 bg-emerald-500 rounded-full border-2 border-white ring-1 ring-emerald-400 animate-pulse" title="Online"></span>
+                            ) : (
+                              <span className="absolute bottom-0 right-0 w-3 h-3 bg-neutral-300 rounded-full border-2 border-white" title="Offline"></span>
+                            )}
+                          </div>
+                          <div className="flex-1 text-left min-w-0 mr-2">
+                            <div className="flex items-center space-x-1.5">
+                              <p 
+                                onClick={() => onUserClick(u.id)}
+                                className="font-extrabold text-xs uppercase text-neutral-900 truncate hover:underline cursor-pointer"
+                              >
+                                {u.name}
+                              </p>
+                              {isMutualUser ? (
+                                <span className="text-[8px] font-black uppercase bg-emerald-100 text-emerald-800 px-1.5 py-0.2 rounded-md shrink-0">
+                                  Mutual
+                                </span>
+                              ) : isFollowed ? (
+                                <span className="text-[8px] font-bold bg-neutral-100 text-neutral-600 px-1.5 py-0.2 rounded-md shrink-0">
+                                  Diikuti
+                                </span>
+                              ) : null}
+                            </div>
+                            <p className="text-[10px] text-neutral-400 font-semibold truncate mt-0.5">
+                              {uOnline ? '🟢 Online Sekarang' : getUserLastSeenText(u.id)}
+                            </p>
+                          </div>
+
+                          <button 
+                            onClick={() => setSelectedRecipient({ type: 'user', data: u })}
+                            className="px-3.5 py-1.5 bg-neutral-950 hover:bg-black text-white text-[10px] font-black uppercase rounded-xl transition-all shadow-xs active:scale-95 flex items-center space-x-1.5 shrink-0 cursor-pointer"
+                          >
+                            <i className="fas fa-paper-plane text-[9px] text-amber-400"></i>
+                            <span>Chat</span>
+                          </button>
+                        </div>
+                      );
+                    })
+                  )}
                 </div>
               ) : (
-                mutualFollowers.map(u => (
-                  <div key={u.id} className="flex items-center border border-black/5 rounded-2xl hover:border-black transition-all group p-4 bg-white shadow-sm">
-                    <img 
-                      src={u.photoURL} 
-                      className="w-12 h-12 rounded-full mr-4 border border-black/10 bg-gray-100 cursor-pointer object-cover shadow-sm" 
-                      alt={u.name} 
-                      onClick={() => onUserClick(u.id)}
-                    />
-                    <button 
-                      onClick={() => setSelectedRecipient({ type: 'user', data: u })}
-                      className="flex-1 text-left"
-                    >
-                      <p className="font-bold text-sm uppercase">{u.name}</p>
-                      <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Mutual Connection</p>
-                    </button>
-                    <button
-                      onClick={(e) => handleClearDirectUserChat(u.id, e)}
-                      className="p-2 text-gray-300 hover:text-red-600 hover:bg-red-50 rounded-full text-xs transition-colors mr-2"
-                      title="Hapus riwayat obrolan"
-                    >
-                      <i className="fas fa-trash-can"></i>
-                    </button>
-                    <i className="fas fa-chevron-right text-gray-200 group-hover:text-black transition-colors"></i>
-                  </div>
-                ))
+                /* CASE B: NOT SEARCHING -> SHOW ACTIVE CONVERSATIONS & MUTUAL FOLLOWERS */
+                <div className="space-y-3">
+                  {mutualFollowers.length === 0 ? (
+                    <div className="space-y-4">
+                      <div className="text-center py-8 bg-neutral-50 rounded-3xl border border-neutral-200/80 p-5 space-y-2">
+                        <div className="w-12 h-12 rounded-full bg-neutral-200/70 text-neutral-600 flex items-center justify-center text-lg mx-auto shadow-inner">
+                          <i className="fas fa-users-rays"></i>
+                        </div>
+                        <h4 className="font-black text-xs uppercase text-neutral-900">Belum Ada Teman Saling Follow</h4>
+                        <p className="text-xs text-neutral-500 max-w-xs mx-auto leading-relaxed">
+                          Gunakan kolom pencarian di atas untuk mencari dan mengirim pesan ke siapa saja di Vimos!
+                        </p>
+                      </div>
+
+                      {/* QUICK DISCOVER USERS */}
+                      {users.filter(u => u.id !== currentUser?.id).length > 0 && (
+                        <div className="space-y-2">
+                          <span className="text-[10px] font-black uppercase tracking-wider text-neutral-400 px-1">
+                            Rekomendasi Pengguna
+                          </span>
+                          <div className="space-y-2">
+                            {users.filter(u => u.id !== currentUser?.id).slice(0, 5).map(u => {
+                              const uOnline = isUserOnline(u.id);
+                              return (
+                                <div key={u.id} className="flex items-center border border-neutral-200/80 rounded-2xl hover:border-black transition-all p-3 bg-white shadow-2xs">
+                                  <div className="relative shrink-0 mr-3">
+                                    <img 
+                                      src={u.photoURL} 
+                                      className="w-10 h-10 rounded-full border border-neutral-200 bg-neutral-100 cursor-pointer object-cover" 
+                                      alt={u.name} 
+                                      onClick={() => onUserClick(u.id)}
+                                    />
+                                    {uOnline && (
+                                      <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-emerald-500 rounded-full border-2 border-white ring-1 ring-emerald-400"></span>
+                                    )}
+                                  </div>
+                                  <div className="flex-1 text-left min-w-0 mr-2">
+                                    <p 
+                                      onClick={() => onUserClick(u.id)}
+                                      className="font-extrabold text-xs uppercase text-neutral-900 truncate hover:underline cursor-pointer"
+                                    >
+                                      {u.name}
+                                    </p>
+                                    <p className="text-[10px] text-neutral-400 truncate">
+                                      {uOnline ? 'Online' : 'Offline'}
+                                    </p>
+                                  </div>
+                                  <button 
+                                    onClick={() => setSelectedRecipient({ type: 'user', data: u })}
+                                    className="px-3 py-1.5 bg-neutral-950 hover:bg-black text-white text-[10px] font-black uppercase rounded-xl transition-all shadow-xs active:scale-95 flex items-center space-x-1 shrink-0 cursor-pointer"
+                                  >
+                                    <i className="fas fa-message text-[9px] text-amber-400"></i>
+                                    <span>Pesan</span>
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    mutualFollowers.map(u => {
+                      const uOnline = isUserOnline(u.id);
+                      const uStatusText = getUserLastSeenText(u.id);
+
+                      return (
+                        <div key={u.id} className="flex items-center border border-neutral-200/90 rounded-2xl hover:border-black transition-all group p-3.5 bg-white shadow-xs">
+                          <div className="relative shrink-0 mr-3.5">
+                            <img 
+                              src={u.photoURL} 
+                              className="w-12 h-12 rounded-full border border-neutral-200 bg-neutral-100 cursor-pointer object-cover shadow-xs" 
+                              alt={u.name} 
+                              onClick={() => onUserClick(u.id)}
+                            />
+                            {uOnline ? (
+                              <span className="absolute bottom-0 right-0 w-3.5 h-3.5 bg-emerald-500 rounded-full border-2 border-white ring-1 ring-emerald-400 animate-pulse shadow-xs" title="Online"></span>
+                            ) : (
+                              <span className="absolute bottom-0 right-0 w-3.5 h-3.5 bg-neutral-300 rounded-full border-2 border-white" title="Offline"></span>
+                            )}
+                          </div>
+                          <button 
+                            onClick={() => setSelectedRecipient({ type: 'user', data: u })}
+                            className="flex-1 text-left min-w-0"
+                          >
+                            <div className="flex items-center space-x-2">
+                              <p className="font-extrabold text-xs sm:text-sm uppercase text-neutral-900 truncate">{u.name}</p>
+                              {uOnline ? (
+                                <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-full text-[8px] font-extrabold bg-emerald-50 text-emerald-600 border border-emerald-200 shrink-0">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                                  <span>Online</span>
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-full text-[8px] font-semibold bg-neutral-100 text-neutral-400 border border-neutral-200 shrink-0">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-neutral-300"></span>
+                                  <span>Offline</span>
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-[10px] text-neutral-400 font-bold uppercase tracking-widest mt-0.5 truncate">
+                              {uOnline ? 'Aktif Sekarang' : uStatusText}
+                            </p>
+                          </button>
+                          <button
+                            onClick={(e) => handleClearDirectUserChat(u.id, e)}
+                            className="p-2 text-neutral-300 hover:text-red-600 hover:bg-red-50 rounded-full text-xs transition-colors mr-2 cursor-pointer"
+                            title="Hapus riwayat obrolan"
+                          >
+                            <i className="fas fa-trash-can"></i>
+                          </button>
+                          <i className="fas fa-chevron-right text-neutral-300 group-hover:text-black transition-colors"></i>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
               )}
             </div>
           )}
@@ -1362,27 +2024,46 @@ const Chat: React.FC<ChatProps> = ({
                       thread.otherUser.name.toLowerCase().includes(shopSearchQuery.toLowerCase()) || 
                       thread.lastMessage.toLowerCase().includes(shopSearchQuery.toLowerCase())
                     ))
-                    .map(thread => (
+                    .map(thread => {
+                      const otherOnline = isUserOnline(thread.otherUser.id);
+                      return (
                       <div 
                         key={thread.chatId} 
                         className="flex items-center border border-gray-200 rounded-2xl hover:border-black transition-all group p-3.5 bg-white shadow-sm cursor-pointer"
                         onClick={() => setSelectedRecipient({ type: 'user', data: thread.otherUser })}
                       >
-                        <img 
-                          src={thread.otherUser.photoURL} 
-                          className="w-12 h-12 rounded-full mr-3.5 border border-black/10 bg-gray-100 object-cover shadow-sm shrink-0" 
-                          alt={thread.otherUser.name} 
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onUserClick(thread.otherUser.id);
-                          }}
-                        />
+                        <div className="relative shrink-0 mr-3.5">
+                          <img 
+                            src={thread.otherUser.photoURL} 
+                            className="w-12 h-12 rounded-full border border-black/10 bg-gray-100 object-cover shadow-sm" 
+                            alt={thread.otherUser.name} 
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onUserClick(thread.otherUser.id);
+                            }}
+                          />
+                          {otherOnline ? (
+                            <span className="absolute bottom-0 right-0 w-3.5 h-3.5 bg-emerald-500 rounded-full border-2 border-white ring-1 ring-emerald-400 animate-pulse shadow-xs" title="Online"></span>
+                          ) : (
+                            <span className="absolute bottom-0 right-0 w-3.5 h-3.5 bg-neutral-300 rounded-full border-2 border-white" title="Offline"></span>
+                          )}
+                        </div>
                         <div className="flex-1 text-left min-w-0">
                           <div className="flex items-center justify-between">
                             <div className="flex items-center space-x-1.5 truncate">
                               <p className="font-extrabold text-xs uppercase text-gray-900 truncate">{thread.otherUser.name}</p>
+                              {otherOnline ? (
+                                <span className="inline-flex items-center space-x-0.5 px-1.5 py-0.2 bg-emerald-50 text-emerald-600 border border-emerald-200 rounded text-[7px] font-extrabold shrink-0">
+                                  <span className="w-1 h-1 rounded-full bg-emerald-500 animate-pulse"></span>
+                                  <span>Online</span>
+                                </span>
+                              ) : (
+                                <span className="bg-neutral-100 text-neutral-500 text-[7px] font-semibold uppercase px-1.5 py-0.2 rounded shrink-0">
+                                  Offline
+                                </span>
+                              )}
                               <span className="bg-yellow-400 text-black text-[8px] font-black uppercase px-2 py-0.5 rounded-full shrink-0">
-                                <i className="fas fa-store text-[8px] mr-1"></i>Toko / Jual Beli
+                                <i className="fas fa-store text-[8px] mr-1"></i>Toko
                               </span>
                             </div>
                             {thread.timestamp > 0 && (
@@ -1413,36 +2094,82 @@ const Chat: React.FC<ChatProps> = ({
                           <i className="fas fa-trash-can"></i>
                         </button>
                       </div>
-                    ))
+                    );
+                  })
                 )}
               </div>
             </div>
           )}
 
           {activeTab === 'groups' && (
-            groups.length === 0 ? (
-              <div className="text-center py-20 text-gray-400 italic text-sm">You haven't joined any collectives yet.</div>
-            ) : (
-              groups.map(g => (
-                <div key={g.id} className="flex items-center border border-black/5 rounded-2xl hover:border-black transition-all group p-4 bg-white shadow-sm">
-                  {g.photoURL ? (
-                    <img src={g.photoURL} className="w-12 h-12 rounded-full mr-4 border border-black/10 object-cover shadow-sm" alt={g.name} />
-                  ) : (
-                    <div className="w-12 h-12 rounded-full mr-4 bg-black text-white flex items-center justify-center text-lg font-black border border-black/10">
-                      {g.name.substring(0, 1).toUpperCase()}
-                    </div>
+            <div className="space-y-3">
+              {groups.length > 0 && (
+                <div className="relative">
+                  <i className="fas fa-search absolute left-3.5 top-1/2 -translate-y-1/2 text-neutral-400 text-xs"></i>
+                  <input
+                    type="text"
+                    placeholder="Cari grup collective Anda..."
+                    value={collectiveSearchQuery}
+                    onChange={(e) => setCollectiveSearchQuery(e.target.value)}
+                    className="w-full bg-white border border-neutral-200 pl-9 pr-8 py-2.5 rounded-2xl text-xs font-bold focus:outline-none focus:border-black shadow-xs"
+                  />
+                  {collectiveSearchQuery && (
+                    <button
+                      onClick={() => setCollectiveSearchQuery('')}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-black text-xs"
+                    >
+                      <i className="fas fa-xmark"></i>
+                    </button>
                   )}
-                  <button 
-                    onClick={() => setSelectedRecipient({ type: 'group', data: g })}
-                    className="flex-1 text-left"
-                  >
-                    <p className="font-bold text-sm uppercase">{g.name}</p>
-                    <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">{g.participants.length} Orbit Members</p>
-                  </button>
-                  <i className="fas fa-chevron-right text-gray-200 group-hover:text-black transition-colors"></i>
                 </div>
-              ))
-            )
+              )}
+
+              {groups.length === 0 ? (
+                <div className="text-center py-16 bg-neutral-50 rounded-3xl border border-neutral-200/80 p-6 space-y-3">
+                  <div className="w-14 h-14 rounded-full bg-neutral-200 text-neutral-600 flex items-center justify-center text-xl mx-auto shadow-inner">
+                    <i className="fas fa-users-viewfinder"></i>
+                  </div>
+                  <h4 className="font-extrabold text-sm uppercase text-neutral-900">Belum Ada Grup Collective</h4>
+                  <p className="text-xs text-neutral-500 max-w-xs mx-auto">
+                    Buat grup obrolan baru bersama teman-teman yang Anda follow dengan menekan tombol plus di pojok kanan atas.
+                  </p>
+                  <button
+                    onClick={() => setIsCreatingGroup(true)}
+                    className="px-4 py-2.5 bg-neutral-950 hover:bg-black text-white text-xs font-black uppercase rounded-2xl shadow-md transition-all active:scale-95"
+                  >
+                    + Buat Grup Baru
+                  </button>
+                </div>
+              ) : groups.filter(g => !collectiveSearchQuery || (g.name || '').toLowerCase().includes(collectiveSearchQuery.toLowerCase())).length === 0 ? (
+                <div className="text-center py-10 bg-white rounded-3xl border border-neutral-200 p-6">
+                  <p className="text-xs font-bold text-neutral-800">Grup "{collectiveSearchQuery}" tidak ditemukan</p>
+                </div>
+              ) : (
+                groups
+                  .filter(g => !collectiveSearchQuery || (g.name || '').toLowerCase().includes(collectiveSearchQuery.toLowerCase()))
+                  .map(g => (
+                    <div key={g.id} className="flex items-center border border-neutral-200/90 rounded-2xl hover:border-black transition-all group p-3.5 bg-white shadow-xs">
+                      {g.photoURL ? (
+                        <img src={g.photoURL} className="w-12 h-12 rounded-2xl mr-3.5 border border-neutral-200 object-cover shadow-xs" alt={g.name} />
+                      ) : (
+                        <div className="w-12 h-12 rounded-2xl mr-3.5 bg-neutral-950 text-white flex items-center justify-center text-base font-black border border-neutral-800 shadow-xs">
+                          {g.name.substring(0, 1).toUpperCase()}
+                        </div>
+                      )}
+                      <button 
+                        onClick={() => setSelectedRecipient({ type: 'group', data: g })}
+                        className="flex-1 text-left min-w-0"
+                      >
+                        <p className="font-extrabold text-xs sm:text-sm uppercase text-neutral-900 truncate">{g.name}</p>
+                        <p className="text-[10px] text-neutral-400 font-bold uppercase tracking-widest mt-0.5">
+                          {g.participants.length} Anggota Orbit
+                        </p>
+                      </button>
+                      <i className="fas fa-chevron-right text-neutral-300 group-hover:text-black transition-colors"></i>
+                    </div>
+                  ))
+              )}
+            </div>
           )}
 
           {activeTab === 'anonymous' && (
@@ -1513,110 +2240,172 @@ const Chat: React.FC<ChatProps> = ({
     : null;
 
   return (
-    <div className="flex flex-col h-[calc(100vh-140px)] animate-fade-in">
-      <div className="p-4 border-b border-black/5 flex items-center space-x-3 bg-white/80 backdrop-blur-md sticky top-0 z-10 shadow-sm">
-        <button onClick={() => setSelectedRecipient(null)} className="w-10 h-10 flex items-center justify-center rounded-full hover:bg-gray-100 transition-colors">
-          <i className="fas fa-arrow-left"></i>
-        </button>
-        {headerPhoto ? (
-          <img 
-            src={headerPhoto} 
-            className="w-10 h-10 rounded-full bg-gray-100 cursor-pointer object-cover border border-black/10 shadow-sm" 
-            alt={headerTitle} 
-            onClick={() => selectedRecipient.type === 'user' ? onUserClick((selectedRecipient.data as User).id) : setIsViewingGroupSettings(true)}
-          />
-        ) : (
-          <div 
-            className="w-10 h-10 rounded-full bg-black text-white flex items-center justify-center text-sm font-black cursor-pointer shadow-sm"
-            onClick={() => setIsViewingGroupSettings(true)}
+    <div className={
+      isFullScreen 
+        ? "fixed inset-0 z-[60] bg-[#f8fafc] flex flex-col h-[100dvh] w-full overflow-hidden select-text animate-fade-in"
+        : "flex flex-col h-[calc(100vh-140px)] bg-[#f8fafc] rounded-3xl border border-neutral-200 overflow-hidden shadow-md animate-fade-in"
+    }>
+      <div className="p-3 sm:p-4 border-b border-black/10 flex items-center justify-between space-x-3 bg-white/95 backdrop-blur-md sticky top-0 z-20 shadow-xs">
+        <div className="flex items-center space-x-2.5 sm:space-x-3 min-w-0">
+          <button 
+            onClick={() => setSelectedRecipient(null)} 
+            className="w-10 h-10 flex items-center justify-center rounded-full hover:bg-neutral-100 text-neutral-800 transition-all active:scale-95 cursor-pointer shrink-0"
+            title="Kembali ke Daftar Obrolan"
           >
-            {headerTitle.substring(0, 1).toUpperCase()}
-          </div>
-        )}
-        <div className="flex-1 min-w-0">
-          <h3 
-            className="font-black text-sm uppercase tracking-tighter truncate cursor-pointer hover:underline"
-            onClick={() => selectedRecipient.type === 'user' ? onUserClick((selectedRecipient.data as User).id) : setIsViewingGroupSettings(true)}
-          >
-            {headerTitle}
-          </h3>
-          {selectedRecipient.type === 'group' && (
-            <p className="text-[8px] font-black uppercase text-gray-400 tracking-widest">Collective Frequency</p>
-          )}
-        </div>
-        {selectedRecipient.type === 'user' ? (
-          <div className="flex items-center space-x-1">
-            {onStartCall && (
-              <>
-                <button
-                  onClick={() => onStartCall('private', 'audio', (selectedRecipient.data as User).id)}
-                  className="w-10 h-10 flex items-center justify-center rounded-full hover:bg-gray-100 text-zinc-600 hover:text-black transition-colors"
-                  title={t('start_voice_call')}
-                >
-                  <i className="fas fa-phone"></i>
-                </button>
-                <button
-                  onClick={() => onStartCall('private', 'video', (selectedRecipient.data as User).id)}
-                  className="w-10 h-10 flex items-center justify-center rounded-full hover:bg-gray-100 text-zinc-600 hover:text-black transition-colors"
-                  title={t('start_video_call')}
-                >
-                  <i className="fas fa-video"></i>
-                </button>
-              </>
-            )}
-            <button
-              onClick={handleClearChatForMe}
-              className="w-10 h-10 flex items-center justify-center rounded-full hover:bg-red-50 text-gray-400 hover:text-red-600 transition-colors ml-1"
-              title="Hapus Obrolan untuk Saya"
-            >
-              <i className="fas fa-trash-can"></i>
-            </button>
-          </div>
-        ) : (
-          <div className="flex items-center space-x-2">
-            {activeGroupCall ? (
-              <button 
-                onClick={() => onJoinCall && onJoinCall(activeGroupCall.id)}
-                className="px-4 py-1.5 bg-emerald-500 hover:bg-emerald-600 text-white rounded-full text-xs font-black uppercase tracking-wider flex items-center space-x-1.5 animate-pulse shadow-md"
-              >
-                <i className="fas fa-phone"></i>
-                <span>{t('join_call')}</span>
-              </button>
+            <i className="fas fa-arrow-left text-sm sm:text-base"></i>
+          </button>
+          
+          <div className="relative shrink-0">
+            {headerPhoto ? (
+              <img 
+                src={headerPhoto} 
+                className="w-10 h-10 sm:w-11 sm:h-11 rounded-full bg-gray-100 cursor-pointer object-cover border border-black/10 shadow-xs ring-2 ring-black/5" 
+                alt={headerTitle} 
+                onClick={() => selectedRecipient.type === 'user' ? onUserClick((selectedRecipient.data as User).id) : setIsViewingGroupSettings(true)}
+              />
             ) : (
-              onStartCall && (
-                <div className="flex items-center space-x-1">
+              <div 
+                className="w-10 h-10 sm:w-11 sm:h-11 rounded-full bg-black text-white flex items-center justify-center text-sm font-black cursor-pointer shadow-xs"
+                onClick={() => setIsViewingGroupSettings(true)}
+              >
+                {headerTitle.substring(0, 1).toUpperCase()}
+              </div>
+            )}
+            {selectedRecipient.type === 'user' ? (
+              isUserOnline((selectedRecipient.data as User).id) ? (
+                <span className="absolute bottom-0 right-0 w-3.5 h-3.5 bg-emerald-500 rounded-full border-2 border-white ring-2 ring-emerald-400 shadow-sm animate-pulse" title="Online"></span>
+              ) : (
+                <span className="absolute bottom-0 right-0 w-3.5 h-3.5 bg-neutral-400 rounded-full border-2 border-white ring-1 ring-neutral-300" title="Offline"></span>
+              )
+            ) : (
+              <span className="absolute bottom-0 right-0 w-3.5 h-3.5 bg-black text-white rounded-full flex items-center justify-center text-[8px] border border-white">
+                <i className="fas fa-users"></i>
+              </span>
+            )}
+          </div>
+
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center space-x-1.5">
+              <h3 
+                className="font-black text-sm sm:text-base uppercase tracking-tight truncate cursor-pointer hover:underline text-neutral-900"
+                onClick={() => selectedRecipient.type === 'user' ? onUserClick((selectedRecipient.data as User).id) : setIsViewingGroupSettings(true)}
+              >
+                {headerTitle}
+              </h3>
+              {selectedRecipient.type === 'group' && (
+                <span className="px-1.5 py-0.5 bg-neutral-100 border border-neutral-300 rounded text-[9px] font-black text-neutral-600 uppercase shrink-0">
+                  Grup
+                </span>
+              )}
+            </div>
+            <p className="text-[10px] sm:text-[11px] font-medium text-neutral-500 truncate flex items-center space-x-1">
+              {selectedRecipient.type === 'group' ? (
+                <span className="cursor-pointer hover:text-black font-semibold" onClick={() => setIsViewingGroupSettings(true)}>
+                  {(selectedRecipient.data as Group).participants.length} Anggota • Klik info grup
+                </span>
+              ) : (
+                isUserOnline((selectedRecipient.data as User).id) ? (
+                  <span className="text-emerald-600 flex items-center space-x-1.5 font-bold">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block animate-pulse"></span>
+                    <span>{t('status_online_active')}</span>
+                  </span>
+                ) : (
+                  <span className="text-neutral-500 flex items-center space-x-1.5 font-medium">
+                    <span className="w-2 h-2 rounded-full bg-neutral-400 inline-block"></span>
+                    <span>{getUserLastSeenText((selectedRecipient.data as User).id)}</span>
+                  </span>
+                )
+              )}
+            </p>
+          </div>
+        </div>
+
+        {/* Right Action Icons */}
+        <div className="flex items-center space-x-1 sm:space-x-1.5 shrink-0">
+          {selectedRecipient.type === 'user' ? (
+            <>
+              {onStartCall && (
+                <>
                   <button
-                    onClick={() => onStartCall('collective', 'audio', (selectedRecipient.data as Group).id, (selectedRecipient.data as Group).name)}
-                    className="w-10 h-10 flex items-center justify-center rounded-full hover:bg-gray-100 text-zinc-600 hover:text-black transition-colors"
+                    onClick={() => onStartCall('private', 'audio', (selectedRecipient.data as User).id)}
+                    className="w-9 h-9 sm:w-10 sm:h-10 flex items-center justify-center rounded-full hover:bg-neutral-100 text-neutral-700 hover:text-black transition-colors"
                     title={t('start_voice_call')}
                   >
-                    <i className="fas fa-phone"></i>
+                    <i className="fas fa-phone text-xs sm:text-sm"></i>
                   </button>
                   <button
-                    onClick={() => onStartCall('collective', 'video', (selectedRecipient.data as Group).id, (selectedRecipient.data as Group).name)}
-                    className="w-10 h-10 flex items-center justify-center rounded-full hover:bg-gray-100 text-zinc-600 hover:text-black transition-colors"
+                    onClick={() => onStartCall('private', 'video', (selectedRecipient.data as User).id)}
+                    className="w-9 h-9 sm:w-10 sm:h-10 flex items-center justify-center rounded-full hover:bg-neutral-100 text-neutral-700 hover:text-black transition-colors"
                     title={t('start_video_call')}
                   >
-                    <i className="fas fa-video"></i>
+                    <i className="fas fa-video text-xs sm:text-sm"></i>
                   </button>
-                </div>
-              )
-            )}
-            <button
-              onClick={handleClearChatForMe}
-              className="w-10 h-10 flex items-center justify-center rounded-full hover:bg-red-50 text-gray-400 hover:text-red-600 transition-colors"
-              title="Hapus Obrolan untuk Saya"
-            >
-              <i className="fas fa-trash-can"></i>
-            </button>
-            <button 
-              onClick={() => setIsViewingGroupSettings(true)} 
-              className="w-10 h-10 flex items-center justify-center rounded-full hover:bg-gray-100 transition-colors"
-            >
-              <i className="fas fa-ellipsis-vertical"></i>
-            </button>
-          </div>
-        )}
+                </>
+              )}
+              <button
+                onClick={handleClearChatForMe}
+                className="w-9 h-9 sm:w-10 sm:h-10 flex items-center justify-center rounded-full hover:bg-red-50 text-neutral-400 hover:text-red-600 transition-colors"
+                title="Hapus Obrolan untuk Saya"
+              >
+                <i className="fas fa-trash-can text-xs sm:text-sm"></i>
+              </button>
+            </>
+          ) : (
+            <>
+              {activeGroupCall ? (
+                <button 
+                  onClick={() => onJoinCall && onJoinCall(activeGroupCall.id)}
+                  className="px-3 sm:px-4 py-1.5 bg-emerald-500 hover:bg-emerald-600 text-white rounded-full text-xs font-black uppercase tracking-wider flex items-center space-x-1.5 animate-pulse shadow-md"
+                >
+                  <i className="fas fa-phone text-[10px]"></i>
+                  <span className="hidden sm:inline">{t('join_call')}</span>
+                </button>
+              ) : (
+                onStartCall && (
+                  <>
+                    <button
+                      onClick={() => onStartCall('collective', 'audio', (selectedRecipient.data as Group).id, (selectedRecipient.data as Group).name)}
+                      className="w-9 h-9 sm:w-10 sm:h-10 flex items-center justify-center rounded-full hover:bg-neutral-100 text-neutral-700 hover:text-black transition-colors"
+                      title={t('start_voice_call')}
+                    >
+                      <i className="fas fa-phone text-xs sm:text-sm"></i>
+                    </button>
+                    <button
+                      onClick={() => onStartCall('collective', 'video', (selectedRecipient.data as Group).id, (selectedRecipient.data as Group).name)}
+                      className="w-9 h-9 sm:w-10 sm:h-10 flex items-center justify-center rounded-full hover:bg-neutral-100 text-neutral-700 hover:text-black transition-colors"
+                      title={t('start_video_call')}
+                    >
+                      <i className="fas fa-video text-xs sm:text-sm"></i>
+                    </button>
+                  </>
+                )
+              )}
+              <button
+                onClick={handleClearChatForMe}
+                className="w-9 h-9 sm:w-10 sm:h-10 flex items-center justify-center rounded-full hover:bg-red-50 text-neutral-400 hover:text-red-600 transition-colors"
+                title="Hapus Obrolan untuk Saya"
+              >
+                <i className="fas fa-trash-can text-xs sm:text-sm"></i>
+              </button>
+              <button 
+                onClick={() => setIsViewingGroupSettings(true)} 
+                className="w-9 h-9 sm:w-10 sm:h-10 flex items-center justify-center rounded-full hover:bg-neutral-100 text-neutral-700 hover:text-black transition-colors"
+                title="Pengaturan Grup"
+              >
+                <i className="fas fa-ellipsis-vertical text-xs sm:text-sm"></i>
+              </button>
+            </>
+          )}
+
+          {/* Toggle Full Screen Button */}
+          <button
+            onClick={() => setIsFullScreen(!isFullScreen)}
+            className="w-9 h-9 sm:w-10 sm:h-10 flex items-center justify-center rounded-full hover:bg-neutral-100 text-neutral-600 hover:text-black transition-colors"
+            title={isFullScreen ? "Kecilkan Tampilan" : "Tampilan Penuh Layar"}
+          >
+            <i className={`fas ${isFullScreen ? 'fa-compress' : 'fa-expand'} text-xs`}></i>
+          </button>
+        </div>
       </div>
       
       {/* Backdrop overlay for active message options menu */}
@@ -1627,10 +2416,19 @@ const Chat: React.FC<ChatProps> = ({
         />
       )}
 
-      <div className="flex-1 overflow-y-auto p-4 space-y-6 bg-gray-50/50 scroll-smooth">
+      <div className="flex-1 overflow-y-auto p-3 sm:p-6 space-y-4 bg-[#f1f3f7] scroll-smooth">
+        <div className="max-w-4xl mx-auto w-full flex-1 flex flex-col justify-end min-h-full space-y-4">
         {messages.length === 0 ? (
-          <div className="text-center py-16 text-gray-400 text-xs italic">
-            Belum ada pesan dalam obrolan ini.
+          <div className="text-center py-16 px-4 my-auto">
+            <div className="w-16 h-16 rounded-full bg-neutral-200 flex items-center justify-center mx-auto mb-3 text-neutral-500 text-2xl shadow-inner">
+              <i className={selectedRecipient.type === 'group' ? "fas fa-comments" : "fas fa-comment-dots"}></i>
+            </div>
+            <h4 className="font-black text-sm text-neutral-800 uppercase tracking-tight">
+              {selectedRecipient.type === 'group' ? `Grup ${headerTitle}` : `Obrolan dengan ${headerTitle}`}
+            </h4>
+            <p className="text-xs text-neutral-400 mt-1 max-w-xs mx-auto">
+              Belum ada pesan dalam obrolan ini. Tulis pesan atau kirim foto pertama di bawah!
+            </p>
           </div>
         ) : (
           messages.map((m) => {
@@ -1686,11 +2484,116 @@ const Chat: React.FC<ChatProps> = ({
                       e.stopPropagation();
                       setActiveMenuMsgId(isMenuOpen ? null : m.id);
                     }}
-                    className={`p-4 rounded-3xl text-sm font-medium shadow-sm transition-all cursor-pointer hover:scale-[1.01] ${
+                    className={`p-3.5 sm:p-4 rounded-3xl text-sm font-medium shadow-sm transition-all cursor-pointer hover:scale-[1.01] max-w-full ${
                       isMe ? 'bg-black text-white rounded-br-none' : 'bg-white border border-black/5 text-black rounded-bl-none'
                     }`}
                   >
-                    {m.text}
+                    {/* Photo Attachment in Chat Bubble */}
+                    {(m.photoURL || (m.mediaType === 'image' && m.mediaURL)) && (
+                      <div 
+                        className="relative group/media overflow-hidden rounded-2xl mb-2 cursor-pointer max-w-sm bg-zinc-900"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setFullscreenMedia({
+                            url: m.photoURL || m.mediaURL || '',
+                            type: 'image',
+                            caption: m.text,
+                            senderName: sender?.name || (isMe ? currentUser?.name : 'Teman'),
+                            timestamp: m.timestamp
+                          });
+                        }}
+                      >
+                        <img 
+                          src={m.photoURL || m.mediaURL} 
+                          alt="Foto Obrolan" 
+                          className="w-full max-h-72 object-cover rounded-2xl transition-transform duration-300 group-hover/media:scale-105"
+                          loading="lazy"
+                        />
+                        <div className="absolute inset-0 bg-black/0 group-hover/media:bg-black/30 transition-all flex items-center justify-center opacity-0 group-hover/media:opacity-100">
+                          <span className="bg-black/75 text-white text-[10px] font-black px-3 py-1.5 rounded-full flex items-center space-x-1.5 backdrop-blur-sm shadow-md">
+                            <i className="fas fa-expand"></i>
+                            <span>Buka Foto</span>
+                          </span>
+                        </div>
+                        {m.fileSize && (
+                          <span className="absolute bottom-2 left-2 bg-black/60 text-white text-[9px] font-bold px-2 py-0.5 rounded-md backdrop-blur-sm">
+                            {m.fileSize}
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Video Attachment in Chat Bubble */}
+                    {(m.videoURL || (m.mediaType === 'video' && m.mediaURL)) && (
+                      <div 
+                        className="relative rounded-2xl overflow-hidden mb-2 max-w-sm bg-black border border-white/10"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <video 
+                          src={m.videoURL || m.mediaURL} 
+                          controls 
+                          playsInline 
+                          preload="metadata"
+                          className="w-full max-h-72 rounded-t-2xl bg-black object-contain"
+                        />
+                        <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-900 text-[10px] text-zinc-300">
+                          <div className="flex items-center space-x-1.5 truncate">
+                            <i className="fas fa-video text-red-500"></i>
+                            <span className="font-bold truncate">{m.fileName || 'Video'}</span>
+                          </div>
+                          <button 
+                            onClick={() => setFullscreenMedia({
+                              url: m.videoURL || m.mediaURL || '',
+                              type: 'video',
+                              caption: m.text,
+                              senderName: sender?.name || (isMe ? currentUser?.name : 'Teman'),
+                              timestamp: m.timestamp
+                            })}
+                            className="text-white hover:text-red-400 text-xs px-2 py-0.5 rounded transition-colors shrink-0 ml-2"
+                            title="Tonton Layar Penuh"
+                          >
+                            <i className="fas fa-expand mr-1"></i>Layar Penuh
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Text Message / Caption */}
+                    {m.text && (
+                      <p className="whitespace-pre-wrap break-words leading-relaxed">
+                        {m.text}
+                      </p>
+                    )}
+
+                    {/* Timestamp & double check mark */}
+                    <div className={`flex items-center justify-end space-x-1.5 mt-1 text-[9px] font-medium ${isMe ? 'text-zinc-400' : 'text-gray-400'}`}>
+                      <span>
+                        {m.timestamp ? new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
+                      </span>
+                      {isMe && (
+                        (() => {
+                          let isRead = false;
+                          if (selectedRecipient.type === 'user') {
+                            const otherUserId = (selectedRecipient.data as User).id;
+                            const otherUserSafeId = getSafeKey(otherUserId);
+                            isRead = Boolean(m.read === true || (m.readBy && m.readBy[otherUserSafeId]));
+                          } else if (selectedRecipient.type === 'group') {
+                            const safeMyId = getSafeKey(currentUser.id);
+                            isRead = Boolean(m.readBy && Object.keys(m.readBy).some(k => k !== safeMyId));
+                          }
+
+                          return (
+                            <span className="inline-flex items-center" title={isRead ? "Sudah dibaca (Read)" : "Terkirim (Sent)"}>
+                              {isRead ? (
+                                <i className="fas fa-check-double text-[9px] text-sky-400 font-bold"></i>
+                              ) : (
+                                <i className="fas fa-check-double text-[9px] text-zinc-400 opacity-60"></i>
+                              )}
+                            </span>
+                          );
+                        })()
+                      )}
+                    </div>
                   </div>
 
                   {/* Action menu button for received messages */}
@@ -1725,24 +2628,197 @@ const Chat: React.FC<ChatProps> = ({
             );
           })
         )}
+        </div>
+        {/* Bottom anchor for auto scroll */}
+        <div ref={chatBottomRef} className="h-1" />
       </div>
 
-      <form onSubmit={handleSend} className="p-4 border-t border-black/5 bg-white flex space-x-2">
-        <input 
-          type="text" 
-          value={msg}
-          onChange={e => setMsg(e.target.value)}
-          placeholder="Type a whisper..."
-          className="flex-1 bg-gray-50 border-2 border-black rounded-full px-6 py-3 text-sm focus:outline-none focus:bg-white transition-all shadow-inner"
-        />
-        <button 
-          type="submit" 
-          disabled={!msg.trim()}
-          className="w-12 h-12 bg-black text-white rounded-full flex items-center justify-center hover:scale-110 active:scale-95 transition-all shadow-lg disabled:opacity-20"
+      {/* Bottom Input Area Container */}
+      <div className="w-full bg-white/95 backdrop-blur-md border-t border-neutral-200/90 p-3 sm:p-4 sticky bottom-0 z-20 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-lg">
+        <div className="max-w-4xl mx-auto w-full space-y-2.5">
+          {/* Media Attachment Preview Bar if Photo or Video is selected */}
+          {selectedMedia && (
+            <div className="px-4 py-2.5 bg-zinc-950 text-white rounded-2xl border border-zinc-800 flex items-center justify-between space-x-3 animate-fade-in shadow-inner">
+              <div className="flex items-center space-x-3 min-w-0">
+                <div className="relative w-14 h-14 rounded-2xl overflow-hidden bg-black border border-white/20 shrink-0 shadow-md">
+                  {selectedMedia.type === 'image' ? (
+                    <img src={selectedMedia.url} alt="Pratinjau Foto" className="w-full h-full object-cover" />
+                  ) : (
+                    <video src={selectedMedia.url} className="w-full h-full object-cover" />
+                  )}
+                  <span className={`absolute top-0.5 right-0.5 text-[8px] font-black px-1.5 py-0.2 rounded-md uppercase text-white shadow-xs ${selectedMedia.type === 'image' ? 'bg-blue-600' : 'bg-red-600'}`}>
+                    {selectedMedia.type === 'image' ? 'Foto' : 'Video'}
+                  </span>
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center space-x-1.5">
+                    <i className={`fas ${selectedMedia.type === 'image' ? 'fa-image text-blue-400' : 'fa-video text-red-400'} text-xs`}></i>
+                    <p className="text-xs font-black text-white truncate max-w-[180px] sm:max-w-xs">
+                      {selectedMedia.name || (selectedMedia.type === 'image' ? 'Foto Terlampir' : 'Video Terlampir')}
+                    </p>
+                  </div>
+                  <p className="text-[10px] text-zinc-400 font-semibold mt-0.5">
+                    {selectedMedia.size ? `Ukuran: ${selectedMedia.size}` : 'Siap dikirim'} • Tekan tombol kirim atau tambahkan pesan
+                  </p>
+                </div>
+              </div>
+              <button 
+                type="button" 
+                onClick={() => setSelectedMedia(null)}
+                className="w-8 h-8 rounded-full bg-zinc-800 hover:bg-red-600 text-zinc-300 hover:text-white flex items-center justify-center transition-all text-xs shrink-0 active:scale-90 cursor-pointer"
+                title="Batalkan Lampiran"
+              >
+                <i className="fas fa-xmark"></i>
+              </button>
+            </div>
+          )}
+
+          {/* Processing Spinner Indicator */}
+          {isProcessingMedia && (
+            <div className="px-4 py-2 bg-gradient-to-r from-blue-50 to-indigo-50 text-blue-700 border border-blue-200 rounded-2xl text-xs font-black flex items-center space-x-2 animate-pulse">
+              <i className="fas fa-spinner fa-spin text-blue-600"></i>
+              <span>Memproses foto / video berkualitas tinggi...</span>
+            </div>
+          )}
+
+          {/* Input form with Photo & Video attachment tools */}
+          <form onSubmit={handleSend} className="flex items-center space-x-2 sm:space-x-3">
+            {/* Hidden inputs for media upload */}
+            <input 
+              type="file" 
+              ref={fileInputRef} 
+              accept="image/*,video/*" 
+              onChange={(e) => handleFileSelect(e)} 
+              className="hidden" 
+            />
+            <input 
+              type="file" 
+              ref={cameraInputRef} 
+              accept="image/*" 
+              capture="environment" 
+              onChange={(e) => handleFileSelect(e, 'image')} 
+              className="hidden" 
+            />
+
+            {/* Attachment Button for Gallery / File */}
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="w-10 h-10 sm:w-11 sm:h-11 rounded-full bg-neutral-100 hover:bg-black hover:text-white text-neutral-700 flex items-center justify-center transition-all active:scale-95 shadow-xs shrink-0 cursor-pointer"
+              title="Kirim Foto atau Video"
+            >
+              <i className="fas fa-photo-film text-sm"></i>
+            </button>
+
+            {/* Camera Snapshot Button */}
+            <button
+              type="button"
+              onClick={() => cameraInputRef.current?.click()}
+              className="w-10 h-10 sm:w-11 sm:h-11 rounded-full bg-neutral-100 hover:bg-black hover:text-white text-neutral-700 flex items-center justify-center transition-all active:scale-95 shadow-xs shrink-0 cursor-pointer"
+              title="Ambil Foto dengan Kamera"
+            >
+              <i className="fas fa-camera text-sm"></i>
+            </button>
+
+            {/* Multiline Text Input */}
+            <div className="flex-1 min-w-0 flex items-center bg-neutral-100 border border-neutral-300 focus-within:border-black focus-within:bg-white rounded-2xl sm:rounded-3xl px-4 py-1.5 focus-within:ring-2 focus-within:ring-black/10 transition-all shadow-inner">
+              <textarea 
+                ref={chatTextareaRef}
+                rows={1}
+                value={msg}
+                onChange={e => setMsg(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey) {
+                    e.preventDefault();
+                    handleSend(e);
+                  }
+                }}
+                placeholder={selectedMedia ? "Tambahkan keterangan / caption..." : "Ketik pesan... (Shift+Enter untuk baris baru)"}
+                className="w-full bg-transparent text-sm focus:outline-none resize-none leading-relaxed max-h-28 placeholder:text-neutral-400 py-1"
+                style={{ minHeight: '28px' }}
+              />
+            </div>
+
+            {/* Send Button */}
+            <button 
+              type="submit" 
+              disabled={!msg.trim() && !selectedMedia}
+              className="w-10 h-10 sm:w-11 sm:h-11 bg-black text-white rounded-full flex items-center justify-center hover:scale-105 active:scale-95 transition-all shadow-lg disabled:opacity-20 shrink-0 cursor-pointer"
+              title="Kirim Pesan"
+            >
+              <i className="fas fa-paper-plane text-xs sm:text-sm"></i>
+            </button>
+          </form>
+        </div>
+      </div>
+
+      {/* FULLSCREEN LIGHTBOX / MEDIA VIEWER MODAL */}
+      {fullscreenMedia && (
+        <div 
+          className="fixed inset-0 z-[120] bg-black/95 backdrop-blur-md flex flex-col items-center justify-between p-4 sm:p-6 animate-fade-in"
+          onClick={() => setFullscreenMedia(null)}
         >
-          <i className="fas fa-paper-plane text-sm"></i>
-        </button>
-      </form>
+          {/* Header */}
+          <div className="w-full max-w-4xl flex items-center justify-between py-2 text-white z-10" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center space-x-3">
+              <div className={`w-10 h-10 rounded-full flex items-center justify-center text-white ${fullscreenMedia.type === 'image' ? 'bg-blue-600' : 'bg-red-600'}`}>
+                <i className={`fas ${fullscreenMedia.type === 'image' ? 'fa-image' : 'fa-video'} text-sm`}></i>
+              </div>
+              <div>
+                <p className="font-extrabold text-sm text-white">{fullscreenMedia.senderName || 'Media Obrolan'}</p>
+                <p className="text-[10px] text-zinc-400">
+                  {fullscreenMedia.timestamp ? new Date(fullscreenMedia.timestamp).toLocaleString() : 'Vimos Media'}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center space-x-2">
+              <a 
+                href={fullscreenMedia.url} 
+                download={`vimos_${fullscreenMedia.type}_${Date.now()}.${fullscreenMedia.type === 'image' ? 'jpg' : 'mp4'}`}
+                className="px-3.5 py-2 bg-zinc-800 hover:bg-zinc-700 text-white rounded-xl text-xs font-bold flex items-center space-x-1.5 transition-colors shadow-md"
+                onClick={(e) => e.stopPropagation()}
+                title="Unduh Media"
+              >
+                <i className="fas fa-download text-xs"></i>
+                <span className="hidden sm:inline">Unduh</span>
+              </a>
+              <button 
+                onClick={() => setFullscreenMedia(null)}
+                className="w-10 h-10 rounded-full bg-zinc-800 hover:bg-red-600 text-white flex items-center justify-center transition-colors text-base"
+                title="Tutup"
+              >
+                <i className="fas fa-xmark"></i>
+              </button>
+            </div>
+          </div>
+
+          {/* Content Center */}
+          <div className="flex-1 flex items-center justify-center max-w-4xl w-full my-auto overflow-hidden p-2" onClick={(e) => e.stopPropagation()}>
+            {fullscreenMedia.type === 'image' ? (
+              <img 
+                src={fullscreenMedia.url} 
+                alt="Layar Penuh" 
+                className="max-h-[75vh] max-w-full object-contain rounded-2xl shadow-2xl ring-1 ring-white/10 animate-scale-up" 
+              />
+            ) : (
+              <video 
+                src={fullscreenMedia.url} 
+                controls 
+                autoPlay 
+                playsInline 
+                className="max-h-[75vh] max-w-full rounded-2xl shadow-2xl ring-1 ring-white/10 animate-scale-up bg-black"
+              />
+            )}
+          </div>
+
+          {/* Footer / Caption */}
+          {fullscreenMedia.caption && (
+            <div className="w-full max-w-2xl bg-zinc-900/90 text-white rounded-2xl p-4 border border-white/10 text-center text-xs font-medium z-10 animate-fade-in shadow-2xl" onClick={(e) => e.stopPropagation()}>
+              <p className="whitespace-pre-wrap">{fullscreenMedia.caption}</p>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* CUSTOM CONFIRMATION MODAL POP-UP FOR CHATS */}
       {renderConfirmModal()}

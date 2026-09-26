@@ -76,16 +76,17 @@ const ReelItem: React.FC<{
           </button>
         )}
 
-        {post.userId === currentUser.id && onDeletePost && (
+        {(post.userId === currentUser.id || currentUser.isAdmin) && onDeletePost && (
           <button 
             onClick={() => onDeletePost(post.id)}
-            className="flex flex-col items-center group mb-2"
+            className="flex flex-col items-center group mb-2 cursor-pointer"
+            title="Hapus Video Reel"
           >
-            <div className="w-10 h-10 rounded-full flex items-center justify-center shadow-lg active:scale-90 transition-all bg-white text-red-600">
+            <div className="w-10 h-10 rounded-full flex items-center justify-center shadow-lg active:scale-90 transition-all bg-white text-red-600 hover:bg-red-50">
               <i className="fas fa-trash text-sm"></i>
             </div>
             <span className="text-[8px] font-black mt-1 uppercase tracking-tighter text-white">
-              Delete
+              Hapus
             </span>
           </button>
         )}

@@ -437,11 +437,11 @@ const PostCard: React.FC<PostCardProps> = ({
           </button>
         )}
         
-        {isMe && onDeletePost && (
+        {(isMe || currentUser?.isAdmin) && onDeletePost && (
           <button 
             onClick={() => onDeletePost(post.id)}
-            className="w-8 h-8 flex items-center justify-center rounded-full transition-all border shrink-0 text-gray-500 border-gray-200 bg-gray-50 hover:bg-red-50 hover:text-red-500 hover:border-red-200"
-            title="Delete Post"
+            className="w-8 h-8 flex items-center justify-center rounded-full transition-all border shrink-0 text-gray-500 border-gray-200 bg-gray-50 hover:bg-red-50 hover:text-red-500 hover:border-red-200 cursor-pointer"
+            title="Hapus Postingan"
           >
             <i className="fas fa-trash text-[10px]"></i>
           </button>

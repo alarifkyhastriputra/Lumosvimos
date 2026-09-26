@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { View, User, Post, Comment, UserNotification, Announcement, Story, LiveStream, GlobalSound } from './types.ts';
+import { View, User, Post, Comment, UserNotification, Announcement, Story, GlobalSound } from './types.ts';
 import Header from './components/Header.tsx';
 import Navbar from './components/Navbar.tsx';
 import Feed from './components/Feed.tsx';
@@ -11,14 +11,13 @@ import Profile from './components/Profile.tsx';
 import Notifications from './components/Notifications.tsx';
 import Reels from './components/Reels.tsx';
 import AuthScreen from './components/AuthScreen.tsx';
+import RequireGoogleLinkScreen from './components/RequireGoogleLinkScreen.tsx';
 import AdminPanel from './components/AdminPanel.tsx';
 import Shop from './components/Shop.tsx';
 import SinglePostView from './components/SinglePostView.tsx';
-import LiveStreamModal from './components/LiveStreamModal.tsx';
-import { LiveHub } from './components/LiveHub.tsx';
 import { auth, db } from './firebase.ts';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
-import { ref, onValue, set, update, push, remove, query, limitToLast, get, Unsubscribe as DBUnsubscribe } from 'firebase/database';
+import { ref, onValue, set, update, push, remove, query, limitToLast, get, onDisconnect, serverTimestamp, Unsubscribe as DBUnsubscribe } from 'firebase/database';
 import { useLanguage } from './LanguageContext.tsx';
 import CallingOverlay, { ActiveCall } from './components/CallingOverlay.tsx';
 import { HeadsUpNotification, IncomingMessagePayload, playChatNotificationSound } from './components/HeadsUpNotification.tsx';
@@ -52,6 +51,7 @@ export default function App() {
       return stored ? JSON.parse(stored) : [];
     } catch { return []; }
   });
+  const [userStatuses, setUserStatuses] = useState<Record<string, { state: 'online' | 'offline'; last_changed?: number }>>({});
   const [posts, setPosts] = useState<Post[]>(() => {
     try {
       const stored = localStorage.getItem('vimos_posts');
@@ -117,16 +117,8 @@ export default function App() {
     }
   };
 
-  // Live Stream States
-  const [activeStreams, setActiveStreams] = useState<LiveStream[]>(() => {
-    try {
-      const stored = localStorage.getItem('vimos_active_streams');
-      return stored ? JSON.parse(stored) : [];
-    } catch { return []; }
-  });
-  const [isLiveModalOpen, setIsLiveModalOpen] = useState(false);
-  const [selectedLiveStreamId, setSelectedLiveStreamId] = useState<string | null>(null);
-  const [liveModalMode, setLiveModalMode] = useState<'browse' | 'create' | 'watch'>('browse');
+  // Post Deletion Confirmation Modal State
+  const [postToDelete, setPostToDelete] = useState<Post | null>(null);
 
   // Back Button Navigation & Exit Confirmation States
   const [isExitConfirmOpen, setIsExitConfirmOpen] = useState(false);
@@ -140,9 +132,6 @@ export default function App() {
 
   const selectedProfileIdRef = useRef<string | null>(selectedProfileId);
   useEffect(() => { selectedProfileIdRef.current = selectedProfileId; }, [selectedProfileId]);
-
-  const isLiveModalOpenRef = useRef<boolean>(isLiveModalOpen);
-  useEffect(() => { isLiveModalOpenRef.current = isLiveModalOpen; }, [isLiveModalOpen]);
 
   const currentCallRef = useRef<ActiveCall | null>(currentCall);
   useEffect(() => { currentCallRef.current = currentCall; }, [currentCall]);
@@ -173,8 +162,9 @@ export default function App() {
       }
 
       if (user) {
-        const isAdmin = isEmailAdmin(user.email);
+        const isMasterEmailAdmin = isEmailAdmin(user.email);
         const fallbackAccountName = user.displayName || (user.email ? user.email.split('@')[0] : 'Member');
+        const isGoogleAccount = user.providerData?.some(p => p.providerId === 'google.com') || false;
         
         // Optimistically set currentUser to avoid loading screen
         setCurrentUser(prev => {
@@ -188,7 +178,8 @@ export default function App() {
             following: [],
             recentCaptures: [],
             totalLikes: 0,
-            isAdmin: isAdmin
+            isAdmin: isMasterEmailAdmin,
+            isGoogleLinked: isGoogleAccount
           };
           try { localStorage.setItem('vimos_user', JSON.stringify(updated)); } catch {}
           return updated;
@@ -206,8 +197,17 @@ export default function App() {
               try { localStorage.removeItem('vimos_user'); } catch {}
               return;
             }
-            if (data.isAdmin !== isAdmin) {
-              update(userRef, { isAdmin: isAdmin });
+            
+            const effectiveIsAdmin = Boolean(
+              isMasterEmailAdmin || 
+              data.isAdmin === true || 
+              data.role === 'Admin' || 
+              data.role === 'Super Admin' || 
+              data.role === 'Co-Admin'
+            );
+
+            if (isMasterEmailAdmin && !data.isAdmin) {
+              update(userRef, { isAdmin: true });
             }
 
             // Fix legacy Anonymous Shadow/Orbit name in database if present
@@ -222,8 +222,10 @@ export default function App() {
             const activeUserData = { 
               id: user.uid, 
               ...data,
+              isGoogleLinked: isGoogleAccount || Boolean(data.isGoogleLinked),
+              googleEmail: data.googleEmail || (isGoogleAccount ? user.email : undefined),
               name: cleanName,
-              isAdmin: isAdmin,
+              isAdmin: effectiveIsAdmin,
               followers: data.followers ? Object.keys(data.followers) : [],
               following: data.following ? Object.keys(data.following) : [],
               recentCaptures: data.recentCaptures ? Object.values(data.recentCaptures) : []
@@ -240,7 +242,8 @@ export default function App() {
               following: {},
               recentCaptures: {},
               totalLikes: 0,
-              isAdmin: isAdmin
+              isAdmin: isMasterEmailAdmin,
+              isGoogleLinked: isGoogleAccount
             };
             set(userRef, newUser);
             const formattedUser = {
@@ -270,6 +273,91 @@ export default function App() {
     };
   }, []);
 
+  // Realtime Presence / Online-Offline Status Management for currentUser
+  useEffect(() => {
+    if (!currentUser?.id) return;
+    const uid = currentUser.id;
+    const userStatusDatabaseRef = ref(db, `status/${uid}`);
+    const connectedRef = ref(db, '.info/connected');
+
+    const markOnline = () => {
+      set(userStatusDatabaseRef, {
+        state: 'online',
+        last_changed: serverTimestamp()
+      }).catch(() => {});
+    };
+
+    const markOffline = () => {
+      set(userStatusDatabaseRef, {
+        state: 'offline',
+        last_changed: serverTimestamp()
+      }).catch(() => {});
+    };
+
+    const unsubConnected = onValue(connectedRef, (snap) => {
+      if (snap.val() === true) {
+        onDisconnect(userStatusDatabaseRef)
+          .set({
+            state: 'offline',
+            last_changed: serverTimestamp()
+          })
+          .then(() => {
+            if (document.visibilityState === 'visible') {
+              markOnline();
+            } else {
+              markOffline();
+            }
+          })
+          .catch(() => {});
+      }
+    });
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        markOnline();
+      } else {
+        markOffline();
+      }
+    };
+
+    const handleFocus = () => {
+      markOnline();
+    };
+
+    const handlePageHide = () => {
+      markOffline();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('pagehide', handlePageHide);
+    window.addEventListener('beforeunload', handlePageHide);
+
+    return () => {
+      unsubConnected();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('beforeunload', handlePageHide);
+      markOffline();
+    };
+  }, [currentUser?.id]);
+
+  // Sync global users presence status from Firebase
+  useEffect(() => {
+    const statusRef = ref(db, 'status');
+    const unsubStatus = onValue(statusRef, (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        setUserStatuses(data);
+      } else {
+        setUserStatuses({});
+      }
+    }, (err) => console.warn('User status sync error:', err));
+
+    return () => unsubStatus();
+  }, []);
+
   const usersRef = useRef<User[]>(users);
   useEffect(() => {
     usersRef.current = users;
@@ -293,14 +381,7 @@ export default function App() {
         return;
       }
 
-      // 2. If Live Stream Modal is open, close it
-      if (isLiveModalOpenRef.current) {
-        setIsLiveModalOpen(false);
-        try { window.history.pushState({ orbit_app: true, layer: 1 }, ''); } catch {}
-        return;
-      }
-
-      // 3. If Single Post Deep Link / Modal is open, close it back to feed
+      // 2. If Single Post Deep Link / Modal is open, close it back to feed
       if (selectedPostIdRef.current) {
         setSelectedPostId(null);
         try {
@@ -314,7 +395,7 @@ export default function App() {
         return;
       }
 
-      // 4. If viewing someone else's profile, return to Home (Feed)
+      // 3. If viewing someone else's profile, return to Home (Feed)
       if (selectedProfileIdRef.current && currentUserRef.current && selectedProfileIdRef.current !== currentUserRef.current.id) {
         setSelectedProfileId(null);
         setCurrentView(View.FEED);
@@ -322,7 +403,7 @@ export default function App() {
         return;
       }
 
-      // 5. If on any tab other than Home (Feed) (e.g. Reels, Shop, Chat, Notifications, Profile, Admin, Leaderboard, Post)
+      // 4. If on any tab other than Home (Feed) (e.g. Reels, Shop, Chat, Notifications, Profile, Admin, Leaderboard, Post)
       if (currentViewRef.current !== View.FEED) {
         setCurrentView(View.FEED);
         setSelectedProfileId(null);
@@ -333,7 +414,7 @@ export default function App() {
         return;
       }
 
-      // 6. If ALREADY on Home (Feed) with no subviews/modals -> Prompt confirmation to exit
+      // 5. If ALREADY on Home (Feed) with no subviews/modals -> Prompt confirmation to exit
       setIsExitConfirmOpen(true);
       try { window.history.pushState({ orbit_app: true, layer: 1 }, ''); } catch {}
     };
@@ -349,7 +430,6 @@ export default function App() {
     const storiesQuery = query(ref(db, 'stories'), limitToLast(20));
     const usersQuery = query(ref(db, 'users'), limitToLast(40));
     const annQuery = query(ref(db, 'announcements'), limitToLast(8));
-    const streamsQuery = query(ref(db, 'livestreams'), limitToLast(15));
 
     // Fast direct fetch for immediate first paint without waiting for full stream handshake
     get(postsQuery).then((snapshot) => {
@@ -372,20 +452,6 @@ export default function App() {
     const postLoadingTimer = setTimeout(() => {
       setLoadingPosts(false);
     }, 2200);
-
-    const unsubscribeStreams = onValue(streamsQuery, (snapshot) => {
-      const data = snapshot.val();
-      if (data) {
-        const streamList: LiveStream[] = Object.entries(data)
-          .map(([id, val]: [string, any]) => ({ id, ...val }))
-          .filter((item) => item.status === 'live');
-        setActiveStreams(streamList);
-        try { localStorage.setItem('vimos_active_streams', JSON.stringify(streamList)); } catch {}
-      } else {
-        setActiveStreams([]);
-        try { localStorage.removeItem('vimos_active_streams'); } catch {}
-      }
-    }, (err) => console.warn('Streams listener error:', err));
 
     const unsubscribePosts = onValue(postsQuery, (snapshot) => {
       const data = snapshot.val();
@@ -518,7 +584,6 @@ export default function App() {
 
     return () => {
       clearTimeout(postLoadingTimer);
-      unsubscribeStreams();
       unsubscribePosts();
       unsubscribeStories();
       unsubscribeUsers();
@@ -618,6 +683,29 @@ export default function App() {
           ...val
         })).sort((a, b) => b.timestamp - a.timestamp);
         setNotifications(list);
+
+        // Check for new group invite
+        const latestInvite = list.find(n => 
+          n.type === 'group_invite' && 
+          !n.read && 
+          n.timestamp > mountTimeRef.current - 5000 && 
+          !seenChatMsgIdsRef.current.has(n.id)
+        );
+        if (latestInvite) {
+          seenChatMsgIdsRef.current.add(latestInvite.id);
+          playChatNotificationSound();
+          setIncomingChatPayload({
+            id: latestInvite.id,
+            senderId: latestInvite.senderId,
+            senderName: latestInvite.senderName,
+            senderPhoto: latestInvite.senderPhoto,
+            text: `✉️ Mengundang Anda bergabung ke grup "${latestInvite.groupName || 'Collective'}". Klik notifikasi untuk menerima!`,
+            timestamp: latestInvite.timestamp,
+            chatType: 'group',
+            targetId: latestInvite.groupId || '',
+            groupName: latestInvite.groupName || 'Collective'
+          });
+        }
       } else {
         setNotifications([]);
       }
@@ -653,12 +741,16 @@ export default function App() {
             const senderName = senderUser?.name || 'Pengirim Vimos';
             const senderPhoto = senderUser?.photoURL || `https://api.dicebear.com/7.x/initials/svg?seed=${msgVal.senderId}`;
 
+            const messageText = msgVal.text 
+              ? (msgVal.photoURL || msgVal.mediaType === 'image' ? `📷 [Foto] ${msgVal.text}` : (msgVal.videoURL || msgVal.mediaType === 'video' ? `🎥 [Video] ${msgVal.text}` : msgVal.text))
+              : (msgVal.photoURL || msgVal.mediaType === 'image' ? '📷 Mengirim sebuah foto' : (msgVal.videoURL || msgVal.mediaType === 'video' ? '🎥 Mengirim sebuah video' : 'Mengirim pesan baru'));
+
             setIncomingChatPayload({
               id: msgId,
               senderId: msgVal.senderId,
               senderName,
               senderPhoto,
-              text: msgVal.text || 'Mengirim pesan baru',
+              text: messageText,
               timestamp: msgVal.timestamp,
               chatType: 'user',
               targetId: msgVal.senderId
@@ -696,12 +788,16 @@ export default function App() {
             const senderName = senderUser?.name || 'Anggota Grup';
             const senderPhoto = senderUser?.photoURL || `https://api.dicebear.com/7.x/initials/svg?seed=${msgVal.senderId}`;
 
+            const messageText = msgVal.text 
+              ? (msgVal.photoURL || msgVal.mediaType === 'image' ? `📷 [Foto] ${msgVal.text}` : (msgVal.videoURL || msgVal.mediaType === 'video' ? `🎥 [Video] ${msgVal.text}` : msgVal.text))
+              : (msgVal.photoURL || msgVal.mediaType === 'image' ? '📷 Mengirim sebuah foto' : (msgVal.videoURL || msgVal.mediaType === 'video' ? '🎥 Mengirim sebuah video' : 'Pesan grup baru'));
+
             setIncomingChatPayload({
               id: msgId,
               senderId: msgVal.senderId,
               senderName,
               senderPhoto,
-              text: msgVal.text || 'Pesan grup baru',
+              text: messageText,
               timestamp: msgVal.timestamp,
               chatType: 'group',
               targetId: groupId,
@@ -760,6 +856,98 @@ export default function App() {
         read: false
       });
     }
+  };
+
+  const handleToggleAdmin = async (targetUserId: string, currentStatus: boolean) => {
+    const newAdminStatus = !currentStatus;
+    const targetUser = users.find(u => u.id === targetUserId);
+    if (!targetUser) return;
+    
+    try {
+      await update(ref(db, `users/${targetUserId}`), {
+        isAdmin: newAdminStatus,
+        role: newAdminStatus ? (targetUser.role || 'Admin') : (targetUser.role === 'Admin' ? 'Member' : targetUser.role),
+        roleColor: newAdminStatus ? (targetUser.roleColor || '#F59E0B') : (targetUser.role === 'Admin' ? '#000000' : targetUser.roleColor)
+      });
+      
+      // Send real-time notification to the target user
+      const notifRef = push(ref(db, `notifications/${targetUserId}`));
+      await set(notifRef, {
+        id: notifRef.key,
+        senderId: currentUser?.id || 'admin_system',
+        senderName: currentUser?.name || 'Vimos Super Admin',
+        senderPhoto: currentUser?.photoURL || 'https://api.dicebear.com/7.x/bottts/svg?seed=vimos_admin',
+        type: 'comment',
+        commentText: newAdminStatus 
+          ? `👑 Selamat! Anda telah diangkat menjadi Admin Vimos oleh ${currentUser?.name || 'Admin'}. Anda sekarang memiliki akses ke Command Center & wewenang admin!`
+          : `Akses Admin Vimos untuk akun Anda telah dicabut oleh ${currentUser?.name || 'Admin'}.`,
+        timestamp: Date.now(),
+        read: false
+      });
+    } catch (err) {
+      console.error('Error toggling admin privilege:', err);
+    }
+  };
+
+  const handleAcceptGroupInvite = async (notif: UserNotification) => {
+    if (!currentUser || !notif.groupId) return;
+    try {
+      // 1. Add currentUser to group participants
+      await set(ref(db, `groups/${notif.groupId}/participants/${currentUser.id}`), true);
+      // 2. Remove currentUser from group pendingInvites
+      await set(ref(db, `groups/${notif.groupId}/pendingInvites/${currentUser.id}`), null);
+      // 3. Mark notification as accepted & read
+      await update(ref(db, `notifications/${currentUser.id}/${notif.id}`), {
+        status: 'accepted',
+        read: true
+      });
+      // 4. Send notification to inviter that user accepted
+      const notifRef = push(ref(db, `notifications/${notif.senderId}`));
+      set(notifRef, {
+        id: notifRef.key,
+        senderId: currentUser.id,
+        senderName: currentUser.name,
+        senderPhoto: currentUser.photoURL,
+        type: 'group_accepted',
+        groupId: notif.groupId,
+        groupName: notif.groupName || 'Collective',
+        timestamp: serverTimestamp(),
+        read: false
+      });
+      // 5. System announcement in group
+      const sysMsgRef = push(ref(db, `groups/${notif.groupId}/messages`));
+      set(sysMsgRef, {
+        senderId: 'system',
+        text: `🎉 ${currentUser.name} telah menerima undangan dan bergabung ke dalam grup!`,
+        timestamp: serverTimestamp(),
+        read: true
+      });
+      // 6. Navigate directly to Chat with target group selected
+      setTargetChatGroupId(notif.groupId);
+      setCurrentView(View.CHAT);
+    } catch (err) {
+      console.error('Error accepting group invite:', err);
+    }
+  };
+
+  const handleDeclineGroupInvite = async (notif: UserNotification) => {
+    if (!currentUser || !notif.groupId) return;
+    try {
+      // Remove from pending invites
+      await set(ref(db, `groups/${notif.groupId}/pendingInvites/${currentUser.id}`), null);
+      // Mark notification as declined & read
+      await update(ref(db, `notifications/${currentUser.id}/${notif.id}`), {
+        status: 'declined',
+        read: true
+      });
+    } catch (err) {
+      console.error('Error declining group invite:', err);
+    }
+  };
+
+  const handleOpenGroupChat = (groupId: string) => {
+    setTargetChatGroupId(groupId);
+    setCurrentView(View.CHAT);
   };
 
   const toggleLike = (postId: string) => {
@@ -1129,15 +1317,31 @@ export default function App() {
     remove(ref(db, `announcements/${id}`));
   };
 
-  const deletePost = (id: string) => {
+  const requestDeletePost = (id: string) => {
     if (!currentUser) return;
     const post = posts.find(p => p.id === id);
     if (!post) return;
     if (post.userId === currentUser.id || currentUser.isAdmin) {
-      // Optimistic delete
-      setPosts(prev => prev.filter(p => p.id !== id));
-      remove(ref(db, `posts/${id}`));
+      setPostToDelete(post);
     }
+  };
+
+  const confirmDeletePost = () => {
+    if (!postToDelete || !currentUser) return;
+    const id = postToDelete.id;
+    // Optimistic delete
+    setPosts(prev => prev.filter(p => p.id !== id));
+    remove(ref(db, `posts/${id}`));
+    
+    if (selectedPostId === id) {
+      setSelectedPostId(null);
+      try {
+        const url = new URL(window.location.href);
+        url.searchParams.delete('post');
+        window.history.pushState({}, '', url.toString());
+      } catch {}
+    }
+    setPostToDelete(null);
   };
 
   const handleLogout = () => signOut(auth);
@@ -1205,10 +1409,30 @@ export default function App() {
     return () => clearInterval(interval);
   }, [stories]);
 
+  const usersWithPresence = useMemo(() => {
+    return users.map(u => ({
+      ...u,
+      isOnline: userStatuses[u.id]?.state === 'online',
+      lastSeen: userStatuses[u.id]?.last_changed
+    }));
+  }, [users, userStatuses]);
+
   const profileToDisplay = useMemo(() => {
-    if (selectedProfileId) return users.find(u => u.id === selectedProfileId) || null;
-    return currentUser;
-  }, [selectedProfileId, users, currentUser]);
+    if (selectedProfileId) {
+      const foundInUsers = usersWithPresence.find(u => u.id === selectedProfileId);
+      if (foundInUsers) {
+        if (currentUser && currentUser.id === selectedProfileId) {
+          return { ...currentUser, ...foundInUsers, isOnline: userStatuses[currentUser.id]?.state === 'online' };
+        }
+        return foundInUsers;
+      }
+      if (currentUser && currentUser.id === selectedProfileId) {
+        return { ...currentUser, isOnline: userStatuses[currentUser.id]?.state === 'online' };
+      }
+      return null;
+    }
+    return currentUser ? { ...currentUser, isOnline: userStatuses[currentUser.id]?.state === 'online' } : null;
+  }, [selectedProfileId, usersWithPresence, currentUser, userStatuses]);
 
   const handleConfirmExit = () => {
     setIsExitConfirmOpen(false);
@@ -1247,11 +1471,39 @@ export default function App() {
 
   if (!currentUser) return <AuthScreen bannedMessage={bannedMessage} />;
 
+  // Enforce mandatory Google account linking to access Vimos web features
+  const isGoogleLinked = Boolean(
+    currentUser.isGoogleLinked ||
+    auth.currentUser?.providerData?.some(p => p.providerId === 'google.com')
+  );
+
+  if (!isGoogleLinked) {
+    return (
+      <RequireGoogleLinkScreen 
+        currentUser={currentUser}
+        onLinked={(googleInfo) => {
+          setCurrentUser(prev => prev ? {
+            ...prev,
+            isGoogleLinked: true,
+            googleEmail: googleInfo.email || prev.email,
+            googleDisplayName: googleInfo.displayName || prev.name,
+            googlePhotoURL: googleInfo.photoURL || prev.photoURL,
+          } : null);
+        }}
+        onLogout={() => {
+          signOut(auth);
+          try { localStorage.removeItem('vimos_user'); } catch {}
+          setCurrentUser(null);
+        }}
+      />
+    );
+  }
+
   return (
     <div className="flex flex-col min-h-screen bg-white max-w-xl mx-auto border-x border-gray-100 shadow-sm relative overflow-hidden">
       <Header 
         onSearch={setSearchTerm} 
-        users={users} 
+        users={usersWithPresence} 
         onUserClick={(id) => { 
           setSelectedPostId(null);
           try {
@@ -1280,15 +1532,6 @@ export default function App() {
           } catch {}
           setCurrentView(View.SHOP);
         }}
-        onAIClick={() => {
-          setSelectedPostId(null);
-          try {
-            const url = new URL(window.location.href);
-            url.searchParams.delete('post');
-            window.history.pushState({}, '', url.toString());
-          } catch {}
-          setCurrentView(View.CHAT);
-        }}
         userCoins={currentUser.coins ?? 500}
         isAdmin={currentUser.isAdmin}
         onAdminClick={() => {
@@ -1300,16 +1543,6 @@ export default function App() {
           } catch {}
           setCurrentView(View.ADMIN);
         }}
-        onLiveClick={() => {
-          setSelectedPostId(null);
-          try {
-            const url = new URL(window.location.href);
-            url.searchParams.delete('post');
-            window.history.pushState({}, '', url.toString());
-          } catch {}
-          setCurrentView(View.LIVESTREAM);
-        }}
-        activeLiveCount={activeStreams.length}
       />
 
       <main className="flex-1 pb-24 overflow-y-auto scroll-smooth">
@@ -1335,8 +1568,8 @@ export default function App() {
               const post = posts.find(p => p.id === id);
               update(ref(db, `posts/${id}`), { isTakenDown: !post?.isTakenDown });
             }}
-            onDeletePost={deletePost}
-            users={users}
+            onDeletePost={requestDeletePost}
+            users={usersWithPresence}
             isLoading={loadingPosts}
           />
         ) : currentView === View.FEED ? (
@@ -1356,22 +1589,11 @@ export default function App() {
               const post = posts.find(p => p.id === id);
               update(ref(db, `posts/${id}`), { isTakenDown: !post?.isTakenDown });
             }}
-            onDeletePost={deletePost}
-            users={users}
+            onDeletePost={requestDeletePost}
+            users={usersWithPresence}
             isLoading={loadingPosts}
             isSyncing={isSyncingFirebase}
             onRefresh={refreshFirebasePosts}
-            activeStreams={activeStreams}
-            onGoLiveClick={() => {
-              setLiveModalMode('create');
-              setSelectedLiveStreamId(null);
-              setIsLiveModalOpen(true);
-            }}
-            onStreamClick={(streamId) => {
-              setSelectedLiveStreamId(streamId);
-              setLiveModalMode('watch');
-              setIsLiveModalOpen(true);
-            }}
             onCreatePostClick={() => setCurrentView(View.POST)}
           />
         ) : null}
@@ -1386,43 +1608,16 @@ export default function App() {
               const post = posts.find(p => p.id === id);
               update(ref(db, `posts/${id}`), { isTakenDown: !post?.isTakenDown });
             }}
-            onDeletePost={deletePost}
-            users={users}
+            onDeletePost={requestDeletePost}
+            users={usersWithPresence}
           />
         )}
         {currentView === View.POST && <PostCreator onPost={createPost} globalSounds={globalSounds} />}
         {currentView === View.LEADERBOARD && (
           <Leaderboard 
-            users={users} 
+            users={usersWithPresence} 
             posts={posts} 
             onUserClick={(id) => { setSelectedProfileId(id); setCurrentView(View.PROFILE); }} 
-            onStreamClick={(streamId) => {
-              setSelectedLiveStreamId(streamId);
-              setLiveModalMode('watch');
-              setIsLiveModalOpen(true);
-            }}
-          />
-        )}
-        {currentView === View.LIVESTREAM && (
-          <LiveHub
-            activeStreams={activeStreams}
-            users={users}
-            currentUser={currentUser}
-            onGoLiveClick={() => {
-              setLiveModalMode('create');
-              setSelectedLiveStreamId(null);
-              setIsLiveModalOpen(true);
-            }}
-            onStreamClick={(streamId) => {
-              setSelectedLiveStreamId(streamId);
-              setLiveModalMode('watch');
-              setIsLiveModalOpen(true);
-            }}
-            onUserClick={(id) => {
-              setSelectedProfileId(id);
-              setCurrentView(View.PROFILE);
-            }}
-            onFollow={toggleFollow}
           />
         )}
         {currentView === View.NOTIFICATIONS && (
@@ -1444,13 +1639,17 @@ export default function App() {
               notifications.forEach(n => updates[`notifications/${currentUser.id}/${n.id}/read`] = true);
               update(ref(db), updates);
             }}
-            users={users}
+            users={usersWithPresence}
+            onAcceptGroupInvite={handleAcceptGroupInvite}
+            onDeclineGroupInvite={handleDeclineGroupInvite}
+            onOpenGroupChat={handleOpenGroupChat}
           />
         )}
         {currentView === View.CHAT && (
           <Chat 
-            users={users} 
+            users={usersWithPresence} 
             currentUser={currentUser} 
+            userStatuses={userStatuses}
             activeCalls={activeCalls}
             onStartCall={startCall}
             onJoinCall={joinCall}
@@ -1468,31 +1667,61 @@ export default function App() {
             onRequestPermission={requestNotifPermission}
           />
         )}
-        {currentView === View.PROFILE && profileToDisplay && (
-          <Profile 
-            user={profileToDisplay} 
-            users={users}
-            posts={posts}
-            currentUser={currentUser}
-            onToggleFollow={toggleFollow}
-            onLike={toggleLike}
-            onDislike={toggleDislike}
-            onComment={addComment}
-            onTakeDownPost={(id) => {
-              const post = posts.find(p => p.id === id);
-              update(ref(db, `posts/${id}`), { isTakenDown: !post?.isTakenDown });
-            }}
-            onDeletePost={deletePost}
-            onUpdateProfile={(data) => update(ref(db, `users/${currentUser.id}`), data)}
-            onAddCapture={(url) => push(ref(db, `users/${currentUser.id}/recentCaptures`), url)}
-            onUserClick={(id) => { setSelectedProfileId(id); setCurrentView(View.PROFILE); }}
-            onLogout={handleLogout}
-            onBanUser={(id) => {
-              const user = users.find(u => u.id === id);
-              update(ref(db, `users/${id}`), { isBanned: !user?.isBanned });
-            }}
-            onSetRole={(id, role, color) => update(ref(db, `users/${id}`), { role, roleColor: color })}
-          />
+        {currentView === View.PROFILE && (
+          profileToDisplay ? (
+            <Profile 
+              user={profileToDisplay} 
+              users={usersWithPresence}
+              posts={posts}
+              currentUser={currentUser}
+              onToggleFollow={toggleFollow}
+              onLike={toggleLike}
+              onDislike={toggleDislike}
+              onComment={addComment}
+              onTakeDownPost={(id) => {
+                const post = posts.find(p => p.id === id);
+                update(ref(db, `posts/${id}`), { isTakenDown: !post?.isTakenDown });
+              }}
+              onDeletePost={requestDeletePost}
+              onUpdateProfile={(data) => {
+                if (currentUser) {
+                  update(ref(db, `users/${currentUser.id}`), data);
+                }
+              }}
+              onAddCapture={(url) => {
+                if (currentUser) {
+                  push(ref(db, `users/${currentUser.id}/recentCaptures`), url);
+                }
+              }}
+              onUserClick={(id) => { setSelectedProfileId(id); setCurrentView(View.PROFILE); }}
+              onLogout={handleLogout}
+              onBanUser={(id) => {
+                const user = users.find(u => u.id === id);
+                update(ref(db, `users/${id}`), { isBanned: !user?.isBanned });
+              }}
+              onSetRole={(id, role, color) => update(ref(db, `users/${id}`), { role, roleColor: color })}
+              onToggleAdmin={handleToggleAdmin}
+            />
+          ) : (
+            <div className="flex flex-col items-center justify-center min-h-[60vh] p-6 text-center animate-fade-in">
+              <div className="w-16 h-16 rounded-full bg-neutral-100 flex items-center justify-center mb-4 text-neutral-400 shadow-inner">
+                <i className="fas fa-user text-2xl"></i>
+              </div>
+              <h3 className="text-base font-black text-neutral-900 tracking-tight mb-1">Memuat Profil Pengguna...</h3>
+              <p className="text-xs text-neutral-500 max-w-xs mb-6 leading-relaxed">
+                Menghubungkan data profil Anda dari server.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedProfileId(currentUser?.id || null);
+                }}
+                className="px-6 py-2.5 bg-black text-white text-xs font-black rounded-full hover:bg-neutral-800 transition-all active:scale-95 cursor-pointer shadow-md"
+              >
+                Buka Profil Saya
+              </button>
+            </div>
+          )
         )}
         {currentView === View.SHOP && (
           <Shop 
@@ -1509,7 +1738,7 @@ export default function App() {
         )}
         {currentView === View.ADMIN && currentUser.isAdmin && (
           <AdminPanel 
-            users={users} 
+            users={usersWithPresence} 
             announcements={announcements}
             onAddAnnouncement={addAnnouncement}
             onUpdateAnnouncement={updateAnnouncement}
@@ -1520,6 +1749,7 @@ export default function App() {
               update(ref(db, `users/${id}`), { isBanned: !user?.isBanned });
             }}
             onUserClick={(id) => { setSelectedProfileId(id); setCurrentView(View.PROFILE); }}
+            onToggleAdmin={handleToggleAdmin}
           />
         )}
       </main>
@@ -1533,7 +1763,9 @@ export default function App() {
             url.searchParams.delete('post');
             window.history.pushState({}, '', url.toString());
           } catch {}
-          if (view === View.PROFILE) setSelectedProfileId(currentUser.id);
+          if (view === View.PROFILE) {
+            setSelectedProfileId(currentUser?.id || null);
+          }
           setCurrentView(view);
           setSearchTerm('');
         }} 
@@ -1551,15 +1783,43 @@ export default function App() {
         />
       )}
 
-      {isLiveModalOpen && currentUser && (
-        <LiveStreamModal
-          currentUser={currentUser}
-          users={users}
-          activeStreamId={selectedLiveStreamId}
-          initialMode={liveModalMode}
-          onClose={() => setIsLiveModalOpen(false)}
-          onFollow={toggleFollow}
-        />
+      {/* POPUP KONFIRMASI HAPUS POSTINGAN */}
+      {postToDelete && (
+        <div className="fixed inset-0 z-[130] bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 animate-fade-in">
+          <div className="bg-white rounded-3xl p-6 max-w-sm w-full shadow-2xl border-2 border-black text-center animate-scale-up">
+            <div className="w-14 h-14 rounded-full bg-red-50 border border-red-200 flex items-center justify-center mx-auto mb-3.5 text-red-600 shadow-xs">
+              <i className="fas fa-trash-can text-xl"></i>
+            </div>
+            <h3 className="text-base font-black text-neutral-900 tracking-tight">Hapus Postingan Ini?</h3>
+            <p className="text-xs text-neutral-500 mt-1 mb-4 leading-relaxed">
+              Apakah kamu yakin ingin menghapus postingan ini? Foto, video, komentar, dan suka di dalamnya akan dihapus secara permanen.
+            </p>
+            
+            {postToDelete.text && (
+              <div className="bg-neutral-50 border border-neutral-200 rounded-2xl p-3 mb-5 text-left text-xs text-neutral-700 italic line-clamp-3">
+                "{postToDelete.text}"
+              </div>
+            )}
+
+            <div className="flex space-x-2.5">
+              <button
+                type="button"
+                onClick={() => setPostToDelete(null)}
+                className="flex-1 py-3 px-4 rounded-2xl bg-neutral-100 hover:bg-neutral-200 text-neutral-800 text-xs font-bold transition-all active:scale-95 border border-neutral-200/60 cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={confirmDeletePost}
+                className="flex-1 py-3 px-4 rounded-2xl bg-red-600 hover:bg-red-700 text-white text-xs font-black uppercase tracking-wider transition-all active:scale-95 shadow-md flex items-center justify-center space-x-1.5 cursor-pointer"
+              >
+                <i className="fas fa-trash-can text-[11px]"></i>
+                <span>Hapus</span>
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* HEADS-UP POPUP CHAT NOTIFICATION */}

@@ -1,6 +1,6 @@
 
 import React from 'react';
-import { Post, User, Announcement, Story, LiveStream } from '../types.ts';
+import { Post, User, Announcement, Story } from '../types.ts';
 import PostCard from './PostCard.tsx';
 import Stories from './Stories.tsx';
 import { useLanguage } from '../LanguageContext.tsx';
@@ -23,9 +23,6 @@ interface FeedProps {
   isLoading?: boolean;
   isSyncing?: boolean;
   onRefresh?: () => void;
-  activeStreams?: LiveStream[];
-  onStreamClick?: (streamId: string) => void;
-  onGoLiveClick?: () => void;
   onCreatePostClick?: () => void;
 }
 
@@ -105,9 +102,6 @@ const Feed: React.FC<FeedProps> = ({
   isLoading = false,
   isSyncing = false,
   onRefresh,
-  activeStreams = [],
-  onStreamClick,
-  onGoLiveClick,
   onCreatePostClick
 }) => {
   const { t } = useLanguage();
@@ -122,9 +116,6 @@ const Feed: React.FC<FeedProps> = ({
           onAddStory={onAddStory} 
           onDeleteStory={onDeleteStory}
           users={users}
-          activeStreams={activeStreams}
-          onStreamClick={onStreamClick}
-          onGoLiveClick={onGoLiveClick}
         />
       )}
 

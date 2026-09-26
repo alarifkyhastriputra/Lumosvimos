@@ -1,5 +1,5 @@
 
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Post, User, Announcement, Story } from '../types.ts';
 import PostCard from './PostCard.tsx';
 import Stories from './Stories.tsx';
@@ -106,9 +106,87 @@ const Feed: React.FC<FeedProps> = ({
   onCreatePostClick
 }) => {
   const { t } = useLanguage();
+  const [pullStart, setPullStart] = useState<number | null>(null);
+  const [pullDistance, setPullDistance] = useState<number>(0);
+  const [isPullRefreshing, setIsPullRefreshing] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (!isSyncing) {
+      setIsPullRefreshing(false);
+      setPullDistance(0);
+    }
+  }, [isSyncing]);
+
+  const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (window.scrollY === 0 && !isPullRefreshing && !isLoading && !isSyncing) {
+      setPullStart(e.touches[0].clientY);
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (pullStart === null || isPullRefreshing || isLoading || isSyncing) return;
+    
+    const currentY = e.touches[0].clientY;
+    const diff = currentY - pullStart;
+
+    if (diff > 0) {
+      const resistance = 0.45;
+      const pull = Math.min(diff * resistance, 80);
+      setPullDistance(pull);
+      
+      if (diff > 10 && e.cancelable) {
+        e.preventDefault();
+      }
+    }
+  };
+
+  const handleTouchEnd = () => {
+    if (pullStart === null || isPullRefreshing || isLoading || isSyncing) return;
+    
+    if (pullDistance >= 55 && onRefresh) {
+      setIsPullRefreshing(true);
+      setPullDistance(55);
+      onRefresh();
+    } else {
+      setPullDistance(0);
+    }
+    setPullStart(null);
+  };
 
   return (
-    <div className="p-4 flex flex-col space-y-6 max-w-2xl mx-auto">
+    <div 
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
+      className="p-4 flex flex-col space-y-6 max-w-2xl mx-auto select-none touch-pan-y"
+    >
+      {/* Pull To Refresh Visual Indicator */}
+      <div 
+        style={{ 
+          height: `${pullDistance}px`, 
+          opacity: pullDistance > 0 ? 1 : 0,
+          transition: pullStart === null ? 'all 0.25s cubic-bezier(0.16, 1, 0.3, 1)' : 'none'
+        }}
+        className="overflow-hidden flex items-center justify-center w-full transition-all"
+      >
+        <div className="flex items-center space-x-2 bg-neutral-900 border border-neutral-800 text-white px-4 py-2 rounded-full shadow-lg text-[11px] font-black uppercase tracking-wider">
+          {isPullRefreshing || isSyncing ? (
+            <div className="w-3.5 h-3.5 border-2 border-neutral-700 border-t-white rounded-full animate-spin"></div>
+          ) : (
+            <i 
+              style={{ transform: `rotate(${Math.min(pullDistance * 4.5, 360)}deg)` }}
+              className="fas fa-arrow-down text-white transition-transform"
+            ></i>
+          )}
+          <span>
+            {isPullRefreshing || isSyncing 
+              ? 'Memperbarui...' 
+              : pullDistance >= 50 
+                ? 'Lepas untuk memperbarui' 
+                : 'Tarik untuk memperbarui'}
+          </span>
+        </div>
+      </div>
       {/* Stories Section */}
       {onAddStory && (
         <Stories 
@@ -148,18 +226,25 @@ const Feed: React.FC<FeedProps> = ({
         </div>
       )}
 
-      {isSyncing && posts.length > 0 && (
+      {isLoading && posts.length > 0 && (
+        <div className="flex items-center justify-center space-x-2.5 py-3 px-5 bg-neutral-900 border border-neutral-800 rounded-2xl text-xs font-bold text-white animate-fade-in w-full max-w-sm mx-auto shadow-md">
+          <div className="w-3.5 h-3.5 border-2 border-neutral-700 border-t-white rounded-full animate-spin"></div>
+          <span>Sinkronisasi Vimos sedang berjalan...</span>
+        </div>
+      )}
+
+      {isSyncing && posts.length > 0 && !isLoading && (
         <div className="flex items-center justify-center space-x-2 py-2 px-4 bg-neutral-100 border border-neutral-200 rounded-full text-xs font-semibold text-neutral-600 animate-fade-in w-fit mx-auto shadow-2xs">
           <div className="w-3.5 h-3.5 border-2 border-neutral-400 border-t-black rounded-full animate-spin"></div>
           <span>Menyinkronkan postingan terbaru...</span>
         </div>
       )}
 
-      {(isLoading || isSyncing) && posts.length === 0 ? (
+      {isLoading ? (
         <div className="space-y-4">
           <SpinningFeedLoader 
-            message="Memuat Postingan Web..." 
-            subMessage="Menyinkronkan postingan terbaru Orbit" 
+            message="Web lagi ke load harap sabar" 
+            subMessage="Menyinkronkan postingan terbaru Vimos" 
           />
           <PostCardSkeleton />
           <PostCardSkeleton />
@@ -167,10 +252,10 @@ const Feed: React.FC<FeedProps> = ({
       ) : posts.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-12 px-6 text-center bg-white border border-black/5 rounded-3xl shadow-sm animate-fade-in">
           <div className="w-14 h-14 rounded-full bg-neutral-100 border border-neutral-200 flex items-center justify-center mb-3 shadow-xs">
-            <i className="fas fa-ghost text-2xl text-neutral-400"></i>
+            <i className="fas fa-satellite text-2xl text-neutral-400"></i>
           </div>
-          <p className="font-bold text-sm text-neutral-800 mb-1">{t('nothing_here')}</p>
-          <p className="text-xs text-neutral-400 mb-5 max-w-xs leading-relaxed">Jadilah yang pertama membagikan foto, video atau cerita ke Orbit!</p>
+          <p className="font-bold text-sm text-neutral-800 mb-1">Web lagi ke load harap sabar dan menunggu</p>
+          <p className="text-xs text-neutral-400 mb-5 max-w-xs leading-relaxed">Menyinkronkan dan memuat postingan terbaru dari server Orbit...</p>
           
           <div className="flex flex-wrap items-center justify-center gap-3">
             {onRefresh && (

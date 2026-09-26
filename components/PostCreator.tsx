@@ -230,7 +230,11 @@ const PostCreator: React.FC<PostCreatorProps> = ({ onPost, globalSounds = [] }) 
     try {
       let finalPhotoURL = undefined;
       if (preview?.type === 'image') {
-        finalPhotoURL = await compressImage(preview.url, 1080, 1080, 0.82);
+        try {
+          finalPhotoURL = await compressImage(preview.url, 1080, 1080, 0.82);
+        } catch {
+          finalPhotoURL = preview.url;
+        }
       }
 
       onPost({ 

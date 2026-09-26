@@ -37,13 +37,7 @@ export default function App() {
     } catch { return null; }
   });
   const [authLoading, setAuthLoading] = useState<boolean>(false);
-  const [loadingPosts, setLoadingPosts] = useState<boolean>(() => {
-    try {
-      const stored = localStorage.getItem('vimos_posts');
-      const parsed = stored ? JSON.parse(stored) : [];
-      return parsed.length === 0;
-    } catch { return true; }
-  });
+  const [loadingPosts, setLoadingPosts] = useState<boolean>(true);
   const [isSyncingFirebase, setIsSyncingFirebase] = useState<boolean>(false);
   const [users, setUsers] = useState<User[]>(() => {
     try {
@@ -52,12 +46,7 @@ export default function App() {
     } catch { return []; }
   });
   const [userStatuses, setUserStatuses] = useState<Record<string, { state: 'online' | 'offline'; last_changed?: number }>>({});
-  const [posts, setPosts] = useState<Post[]>(() => {
-    try {
-      const stored = localStorage.getItem('vimos_posts');
-      return stored ? JSON.parse(stored) : [];
-    } catch { return []; }
-  });
+  const [posts, setPosts] = useState<Post[]>([]);
   const [globalSounds, setGlobalSounds] = useState<GlobalSound[]>(() => {
     try {
       const stored = localStorage.getItem('vimos_sounds');
@@ -458,7 +447,7 @@ export default function App() {
 
     const postLoadingTimer = setTimeout(() => {
       setLoadingPosts(false);
-    }, 300);
+    }, 600);
 
     const unsubscribePosts = onValue(postsQuery, (snapshot) => {
       const data = snapshot.val();
@@ -472,10 +461,15 @@ export default function App() {
         }));
         
         setPosts(prev => {
-          const tempPosts = prev.filter(p => p.id.startsWith('temp_'));
-          const combined = [...tempPosts, ...postList];
           const uniqueMap = new Map();
-          combined.forEach(p => uniqueMap.set(p.id, p));
+          // Insert Firebase snapshot posts
+          postList.forEach(p => uniqueMap.set(p.id, p));
+          // Preserve any local optimistic posts that are still pending sync
+          prev.forEach(p => {
+            if (!uniqueMap.has(p.id)) {
+              uniqueMap.set(p.id, p);
+            }
+          });
           const sorted = Array.from(uniqueMap.values()).sort((a, b) => b.timestamp - a.timestamp);
           try { localStorage.setItem('vimos_posts', JSON.stringify(sorted.slice(0, 25))); } catch {}
           return sorted;
@@ -1045,11 +1039,14 @@ export default function App() {
     const post = posts.find(p => p.id === postId);
     if (!post) return;
 
+    const commentRef = push(ref(db, `posts/${postId}/comments`));
+    const commentId = commentRef.key || `cid_${Date.now()}`;
+
     // Optimistic UI update for comments
-    const tempComment: Comment = {
-      id: `temp_${Date.now()}`,
+    const newComment: Comment = {
+      id: commentId,
       userId: currentUser.id,
-      userName: currentUser.name || 'Orbit',
+      userName: currentUser.name || 'Member',
       userPhoto: currentUser.photoURL || '',
       text: text.trim(),
       timestamp: Date.now(),
@@ -1060,15 +1057,16 @@ export default function App() {
 
     setPosts(prev => prev.map(p => {
       if (p.id === postId) {
-        return { ...p, comments: [...(p.comments || []), tempComment] };
+        const existingComments = p.comments || [];
+        const filteredComments = existingComments.filter(c => c.id !== commentId);
+        return { ...p, comments: [...filteredComments, newComment] };
       }
       return p;
     }));
 
-    const commentsRef = ref(db, `posts/${postId}/comments`);
-    push(commentsRef, {
+    set(commentRef, {
       userId: currentUser.id,
-      userName: currentUser.name || 'Orbit',
+      userName: currentUser.name || 'Member',
       userPhoto: currentUser.photoURL || '',
       text: text.trim(),
       timestamp: Date.now(),
@@ -1134,9 +1132,27 @@ export default function App() {
     if (!currentUser) return;
     const now = Date.now();
     const resolvedType = mediaType || (videoURL ? 'video' : photoURL ? 'image' : undefined);
-    push(ref(db, 'stories'), {
+    const storyRef = push(ref(db, 'stories'));
+    const storyId = storyRef.key || `story_${now}`;
+
+    const newStory: Story = {
+      id: storyId,
       userId: currentUser.id,
-      userName: currentUser.name || 'Anonymous Orbit',
+      userName: currentUser.name || 'Member',
+      userPhoto: currentUser.photoURL || '',
+      createdAt: now,
+      expiresAt: now + 24 * 60 * 60 * 1000,
+      text: text.trim(),
+      photoURL: photoURL || undefined,
+      videoURL: videoURL || undefined,
+      mediaType: resolvedType || undefined
+    };
+
+    setStories(prev => [newStory, ...prev.filter(s => s.id !== storyId)]);
+
+    set(storyRef, {
+      userId: currentUser.id,
+      userName: currentUser.name || 'Member',
       userPhoto: currentUser.photoURL || '',
       createdAt: now,
       expiresAt: now + 24 * 60 * 60 * 1000,
@@ -1227,12 +1243,14 @@ export default function App() {
   }) => {
     if (!currentUser) return;
     const now = Date.now();
-    const tempPostId = `temp_${now}_${Math.random().toString(36).substring(2, 6)}`;
+    const postsRef = ref(db, 'posts');
+    const newPostRef = push(postsRef);
+    const postId = newPostRef.key || `post_${now}_${Math.random().toString(36).substring(2, 6)}`;
     const currentAuthorName = currentUser.name || 'Member';
     const currentAuthorPhoto = currentUser.photoURL || '';
 
     const newPost: Post = {
-      id: tempPostId,
+      id: postId,
       userId: currentUser.id,
       userName: currentAuthorName,
       userPhoto: currentAuthorPhoto,
@@ -1252,17 +1270,21 @@ export default function App() {
     };
 
     // 1. Instant local state update for zero latency
-    setPosts(prev => [newPost, ...prev]);
+    setPosts(prev => {
+      const filtered = prev.filter(p => p.id !== postId);
+      return [newPost, ...filtered];
+    });
     setLoadingPosts(false);
 
     // 2. Write to local storage cache immediately
     try {
       const storedPosts = JSON.parse(localStorage.getItem('vimos_posts') || '[]');
-      localStorage.setItem('vimos_posts', JSON.stringify([newPost, ...storedPosts].slice(0, 25)));
+      const filteredStored = storedPosts.filter((p: any) => p.id !== postId);
+      localStorage.setItem('vimos_posts', JSON.stringify([newPost, ...filteredStored].slice(0, 25)));
     } catch {}
 
     // 3. Save to Firebase RTDB asynchronously
-    push(ref(db, 'posts'), {
+    set(newPostRef, {
       userId: currentUser.id,
       userName: currentAuthorName,
       userPhoto: currentAuthorPhoto,
@@ -1323,6 +1345,11 @@ export default function App() {
     }
 
     setCurrentView(View.FEED);
+    setSelectedPostId(null);
+    setSelectedProfileId(null);
+    setTimeout(() => {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }, 50);
   };
 
   const addAnnouncement = (text: string) => {

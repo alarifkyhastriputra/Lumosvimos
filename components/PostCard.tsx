@@ -308,10 +308,10 @@ const PostCard: React.FC<PostCardProps> = ({
   return (
     <article 
       ref={containerRef}
-      className={`border rounded-2xl overflow-hidden transition-all shadow-sm ${
+      className={`post-card border rounded-2xl overflow-hidden transition-all duration-300 transform hover:scale-[1.015] shadow-sm ${
       post.isTakenDown 
         ? 'opacity-70 grayscale border-red-500/30 bg-red-50/20' 
-        : 'bg-white border-black/10 hover:border-black/30'
+        : 'bg-white border-black/10 hover:border-black/30 hover:shadow-md'
     }`}>
       {isZoomed && post.photoURL && (
         <div 

@@ -128,6 +128,9 @@ const Chat: React.FC<ChatProps> = ({
   const [activeAnonRoom, setActiveAnonRoom] = useState<any | null>(null);
   const [anonMessages, setAnonMessages] = useState<{ id: string; senderId: string; text: string; timestamp: number }[]>([]);
   const [anonInputMsg, setAnonInputMsg] = useState('');
+  const [typingUsers, setTypingUsers] = useState<Record<string, boolean>>({});
+  const isCurrentlyTypingRef = useRef<boolean>(false);
+  const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Media Attachment States for Photos & Videos in Chat
   const [selectedMedia, setSelectedMedia] = useState<{
@@ -158,6 +161,78 @@ const Chat: React.FC<ChatProps> = ({
       chatTextareaRef.current.style.height = `${Math.min(chatTextareaRef.current.scrollHeight, 120)}px`;
     }
   }, [msg]);
+
+  // Listen for typing indicator
+  useEffect(() => {
+    if (!currentUser || !selectedRecipient) {
+      setTypingUsers({});
+      return;
+    }
+
+    let typingPath = '';
+    if (selectedRecipient.type === 'user') {
+      const chatId = getChatId(currentUser.id, (selectedRecipient.data as User).id);
+      typingPath = `chats/${chatId}/typing`;
+    } else {
+      typingPath = `groups/${(selectedRecipient.data as Group).id}/typing`;
+    }
+
+    const typingRef = ref(db, typingPath);
+    const unsubscribe = onValue(typingRef, (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const typingMap: Record<string, boolean> = {};
+        Object.entries(data).forEach(([uid, isTyping]) => {
+          if (uid !== currentUser.id && isTyping) {
+            typingMap[uid] = true;
+          }
+        });
+        setTypingUsers(typingMap);
+      } else {
+        setTypingUsers({});
+      }
+    });
+
+    return () => {
+      unsubscribe();
+      try {
+        const myTypingRef = ref(db, `${typingPath}/${currentUser.id}`);
+        set(myTypingRef, null).catch(() => {});
+      } catch {}
+      isCurrentlyTypingRef.current = false;
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current);
+      }
+    };
+  }, [selectedRecipient, currentUser]);
+
+  const handleInputChange = (text: string) => {
+    setMsg(text);
+
+    if (!currentUser || !selectedRecipient) return;
+
+    let typingPath = '';
+    if (selectedRecipient.type === 'user') {
+      const chatId = getChatId(currentUser.id, (selectedRecipient.data as User).id);
+      typingPath = `chats/${chatId}/typing/${currentUser.id}`;
+    } else {
+      typingPath = `groups/${(selectedRecipient.data as Group).id}/typing/${currentUser.id}`;
+    }
+
+    if (!isCurrentlyTypingRef.current) {
+      isCurrentlyTypingRef.current = true;
+      set(ref(db, typingPath), true).catch(() => {});
+    }
+
+    if (typingTimeoutRef.current) {
+      clearTimeout(typingTimeoutRef.current);
+    }
+
+    typingTimeoutRef.current = setTimeout(() => {
+      isCurrentlyTypingRef.current = false;
+      set(ref(db, typingPath), null).catch(() => {});
+    }, 2000);
+  };
 
   useEffect(() => {
     if (anonTextareaRef.current) {
@@ -695,18 +770,34 @@ const Chat: React.FC<ChatProps> = ({
     return () => unsubscribe();
   }, [activeAnonRoomId]);
 
-  // Auto scroll to bottom when new messages arrive
+  // Auto scroll to bottom when new messages arrive or typing status changes
   useEffect(() => {
-    if (messages.length > 0) {
+    if (messages.length > 0 || Object.keys(typingUsers).length > 0) {
       setTimeout(() => {
         chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
       }, 100);
     }
-  }, [messages.length]);
+  }, [messages.length, typingUsers]);
 
   const handleSend = (e: React.FormEvent) => {
     e.preventDefault();
     if ((!msg.trim() && !selectedMedia) || !currentUser || !selectedRecipient) return;
+
+    // Instantly clear typing status in Firebase upon sending
+    try {
+      let typingNodePath = '';
+      if (selectedRecipient.type === 'user') {
+        const chatId = getChatId(currentUser.id, (selectedRecipient.data as User).id);
+        typingNodePath = `chats/${chatId}/typing/${currentUser.id}`;
+      } else {
+        typingNodePath = `groups/${(selectedRecipient.data as Group).id}/typing/${currentUser.id}`;
+      }
+      set(ref(db, typingNodePath), null).catch(() => {});
+      isCurrentlyTypingRef.current = false;
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current);
+      }
+    } catch {}
 
     const trimmedMsg = msg.trim();
     const mediaToSend = selectedMedia;
@@ -2579,6 +2670,25 @@ const Chat: React.FC<ChatProps> = ({
             );
           })
         )}
+
+        {/* Typing Indicator Bubble */}
+        {Object.keys(typingUsers).length > 0 && (
+          <div className="flex items-center space-x-2 mt-2 ml-1 animate-fade-in">
+            <div className="flex space-x-2 items-center bg-white border border-neutral-200/80 rounded-2xl px-3.5 py-2.5 shadow-xs max-w-fit">
+              <div className="flex space-x-1 shrink-0">
+                <span className="w-1.5 h-1.5 bg-neutral-600 rounded-full animate-bounce [animation-delay:-0.3s]"></span>
+                <span className="w-1.5 h-1.5 bg-neutral-600 rounded-full animate-bounce [animation-delay:-0.15s]"></span>
+                <span className="w-1.5 h-1.5 bg-neutral-600 rounded-full animate-bounce"></span>
+              </div>
+              <span className="text-[10px] font-black uppercase tracking-tight text-neutral-500 pl-1.5">
+                {Object.keys(typingUsers)
+                  .map(uid => users.find(u => u.id === uid)?.name || 'Seseorang')
+                  .join(', ')}{' '}
+                sedang mengetik...
+              </span>
+            </div>
+          </div>
+        )}
         </div>
         {/* Bottom anchor for auto scroll */}
         <div ref={chatBottomRef} className="h-1" />
@@ -2677,7 +2787,7 @@ const Chat: React.FC<ChatProps> = ({
                 ref={chatTextareaRef}
                 rows={1}
                 value={msg}
-                onChange={e => setMsg(e.target.value)}
+                onChange={e => handleInputChange(e.target.value)}
                 onKeyDown={e => {
                   if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey) {
                     e.preventDefault();

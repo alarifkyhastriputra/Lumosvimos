@@ -51,9 +51,22 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     setTimeout(() => setToastMsg(null), 3500);
   };
 
-  // Subscribe to sellerApplications in Firebase
+  // Subscribe to sellerApplications in Firebase with fast direct pre-fetch
   useEffect(() => {
     const appsRef = ref(db, 'sellerApplications');
+
+    // Fast direct get() to paint applications instantly
+    get(appsRef).then((snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const list: SellerApplication[] = Object.entries(data).map(([id, val]: [string, any]) => ({
+          id,
+          ...val
+        })).sort((a, b) => (b.submittedAt || 0) - (a.submittedAt || 0));
+        setSellerApplications(list);
+      }
+    }).catch(() => {});
+
     const unsub = onValue(appsRef, (snapshot) => {
       const data = snapshot.val();
       if (data) {

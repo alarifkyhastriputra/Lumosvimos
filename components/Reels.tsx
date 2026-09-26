@@ -274,7 +274,7 @@ const Reels: React.FC<ReelsProps> = ({ posts, onLike, onComment, onUserClick, cu
               {isCommenting && (
                 <div className="flex flex-col h-full animate-fade-in">
                   <div className="flex items-center justify-between p-4 border-b border-white/10">
-                    <span className="text-[10px] font-black text-white uppercase tracking-widest">Echoes ({(post.comments || []).length})</span>
+                    <span className="text-[10px] font-black text-white uppercase tracking-widest">Vimos ({(post.comments || []).length})</span>
                     <button onClick={() => setActiveCommentPostId(null)} className="text-white opacity-60 hover:opacity-100">
                       <i className="fas fa-times"></i>
                     </button>

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { User, ChatMessage, Group } from '../types.ts';
 import { db } from '../firebase.ts';
-import { ref, onValue, push, serverTimestamp, set, update, remove, get } from 'firebase/database';
+import { ref, onValue, push, serverTimestamp, set, update, remove, get, query, limitToLast } from 'firebase/database';
 import { ActiveCall } from './CallingOverlay.tsx';
 import { useLanguage } from '../LanguageContext.tsx';
 import { compressImage } from '../services/imageCompressor.ts';
@@ -318,9 +318,31 @@ const Chat: React.FC<ChatProps> = ({
   // Logic to identify MUTUAL FOLLOWERS (Saling Follow Balik)
   const isMutual = (uid: string) => {
     if (!currentUser) return false;
-    const following = currentUser.following || [];
-    const followers = currentUser.followers || [];
-    return following.includes(uid) && followers.includes(uid);
+    const latestMe = users.find(u => u.id === currentUser.id);
+    const following = latestMe ? (latestMe.following || []) : (currentUser.following || []);
+    const followers = latestMe ? (latestMe.followers || []) : (currentUser.followers || []);
+    
+    const targetUser = users.find(u => u.id === uid);
+    const targetFollowers = targetUser ? (targetUser.followers || []) : [];
+    
+    const iFollowThem = following.includes(uid);
+    const theyFollowMe = followers.includes(uid) || targetFollowers.includes(currentUser.id);
+    return iFollowThem && theyFollowMe;
+  };
+
+  const isFollowingOrFollowed = (uid: string) => {
+    if (!currentUser) return false;
+    const latestMe = users.find(u => u.id === currentUser.id);
+    const following = latestMe ? (latestMe.following || []) : (currentUser.following || []);
+    const followers = latestMe ? (latestMe.followers || []) : (currentUser.followers || []);
+    
+    const targetUser = users.find(u => u.id === uid);
+    const targetFollowing = targetUser ? (targetUser.following || []) : [];
+    const targetFollowers = targetUser ? (targetUser.followers || []) : [];
+
+    const iFollowThem = following.includes(uid);
+    const theyFollowMe = followers.includes(uid) || targetFollowers.includes(currentUser.id) || targetFollowing.includes(currentUser.id);
+    return iFollowThem || theyFollowMe;
   };
 
   const mutualFollowers = users.filter(u => u.id !== currentUser?.id && isMutual(u.id));
@@ -395,11 +417,69 @@ const Chat: React.FC<ChatProps> = ({
     return Boolean(deletedForObj[uid] || deletedForObj[safeId]);
   };
 
-  // Sync active Shop Chats from Firebase RTDB
+  const getTimestampNum = (ts: any): number => {
+    if (!ts) return Date.now();
+    if (typeof ts === 'number') return ts;
+    if (typeof ts === 'object' && ts !== null) return Date.now();
+    return Number(ts) || Date.now();
+  };
+
+  // Sync active Shop Chats from Firebase RTDB with high-speed query constraints
   useEffect(() => {
     if (!currentUser) return;
 
-    const chatsRef = ref(db, 'chats');
+    const chatsRef = query(ref(db, 'chats'), limitToLast(60));
+
+    // Fast direct fetch for immediate first paint of active shop chats
+    get(chatsRef).then((snapshot) => {
+      const data = snapshot.val();
+      if (data && users.length > 0) {
+        const threads: ShopChatThread[] = [];
+        Object.entries(data).forEach(([chatId, chatVal]: [string, any]) => {
+          if (!chatId.includes(currentUser.id)) return;
+          const parts = chatId.split('_');
+          if (parts.length !== 2) return;
+          const otherUserId = parts.find(id => id !== currentUser.id);
+          if (!otherUserId) return;
+          const otherUser = users.find(u => u.id === otherUserId);
+          if (!otherUser) return;
+          const messagesObj = chatVal?.messages;
+          if (!messagesObj) return;
+          const msgList = Object.entries(messagesObj)
+            .map(([mId, mVal]: [string, any]) => ({
+              id: mId,
+              ...mVal
+            }))
+            .filter((m: any) => !isMsgDeletedForUser(m.deletedFor, currentUser.id))
+            .sort((a: any, b: any) => getTimestampNum(a.timestamp) - getTimestampNum(b.timestamp));
+
+          if (msgList.length === 0) return;
+          const isShopThread = chatVal?.isShopChat === true || msgList.some((m: any) => 
+            m.isShop === true ||
+            (m.text && (
+              m.text.includes('tertarik untuk membeli') || 
+              m.text.includes('membeli produk') || 
+              m.text.includes('dari toko Anda') ||
+              m.text.includes('Harga:')
+            ))
+          );
+          if (isShopThread) {
+            const lastMsg = msgList[msgList.length - 1];
+            const mediaSummary = lastMsg.photoURL || lastMsg.mediaType === 'image' ? '📷 Foto' : (lastMsg.videoURL || lastMsg.mediaType === 'video' ? '🎥 Video' : '');
+            threads.push({
+              chatId,
+              otherUser,
+              lastMessage: lastMsg.text || mediaSummary || 'Pesan',
+              lastMessageSenderId: lastMsg.senderId || '',
+              timestamp: lastMsg.timestamp || 0
+            });
+          }
+        });
+        threads.sort((a, b) => getTimestampNum(b.timestamp) - getTimestampNum(a.timestamp));
+        setShopChatThreads(threads);
+      }
+    }).catch(() => {});
+
     const unsubscribe = onValue(chatsRef, (snapshot) => {
       const data = snapshot.val();
       if (data && users.length > 0) {
@@ -425,7 +505,7 @@ const Chat: React.FC<ChatProps> = ({
               ...mVal
             }))
             .filter((m: any) => !isMsgDeletedForUser(m.deletedFor, currentUser.id))
-            .sort((a: any, b: any) => (a.timestamp || 0) - (b.timestamp || 0));
+            .sort((a: any, b: any) => getTimestampNum(a.timestamp) - getTimestampNum(b.timestamp));
 
           if (msgList.length === 0) return;
 
@@ -453,7 +533,7 @@ const Chat: React.FC<ChatProps> = ({
           }
         });
 
-        threads.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+        threads.sort((a, b) => getTimestampNum(b.timestamp) - getTimestampNum(a.timestamp));
         setShopChatThreads(threads);
       } else {
         setShopChatThreads([]);
@@ -485,7 +565,7 @@ const Chat: React.FC<ChatProps> = ({
             ...val
           }))
           .filter((m: any) => !isMsgDeletedForUser(m.deletedFor, currentUser.id))
-          .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+          .sort((a, b) => getTimestampNum(a.timestamp) - getTimestampNum(b.timestamp));
         setMessages(list);
 
         // Auto mark incoming unread messages as read when user is actively in this chat
@@ -760,7 +840,7 @@ const Chat: React.FC<ChatProps> = ({
             ...val
           }))
           .filter((m: any) => !m.deletedFor || !m.deletedFor[currentUser?.id || ''])
-          .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+          .sort((a, b) => getTimestampNum(a.timestamp) - getTimestampNum(b.timestamp));
         setAnonMessages(msgList);
       } else {
         setAnonMessages([]);
@@ -1390,13 +1470,13 @@ const Chat: React.FC<ChatProps> = ({
               </button>
               <div>
                 <h2 className="text-xl font-black uppercase tracking-tighter">Buat Grup Baru</h2>
-                <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">New Collective Space</p>
+                <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Ruang Grup Baru</p>
               </div>
             </div>
           </div>
 
           <div className="space-y-2 mb-5">
-            <label className="text-[10px] font-black uppercase tracking-widest ml-1 text-gray-700">Nama Grup Collective</label>
+            <label className="text-[10px] font-black uppercase tracking-widest ml-1 text-gray-700">Nama Grup</label>
             <input 
               type="text" 
               placeholder="Contoh: Orbit Squad, Diskusi Kreatif..." 
@@ -1542,7 +1622,7 @@ const Chat: React.FC<ChatProps> = ({
             <button onClick={() => setIsViewingGroupSettings(false)} className="mr-4 w-10 h-10 flex items-center justify-center rounded-full hover:bg-gray-100 transition-colors">
               <i className="fas fa-arrow-left"></i>
             </button>
-            <h2 className="text-xl font-black uppercase tracking-tighter">Collective Management</h2>
+            <h2 className="text-xl font-black uppercase tracking-tighter">Manajemen Grup</h2>
           </div>
 
           <div className="flex flex-col items-center mb-10">
@@ -1767,11 +1847,11 @@ const Chat: React.FC<ChatProps> = ({
     return (
       <div className="p-3 sm:p-4 h-full flex flex-col animate-fade-in relative max-w-2xl mx-auto w-full">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-3xl font-black uppercase tracking-tighter">Echoes</h2>
+          <h2 className="text-3xl font-black uppercase tracking-tighter">Vimos</h2>
           <button 
             onClick={() => setIsCreatingGroup(true)}
             className="w-11 h-11 flex items-center justify-center border-2 border-black rounded-full hover:bg-black hover:text-white transition-all shadow-md active:scale-90"
-            title="Create Collective"
+            title="Buat Grup"
           >
             <i className="fas fa-users-viewfinder text-base"></i>
           </button>
@@ -1834,7 +1914,7 @@ const Chat: React.FC<ChatProps> = ({
               activeTab === 'groups' ? 'border-black text-black' : 'border-transparent text-gray-400'
             }`}
           >
-            Collectives
+            Grup
           </button>
 
           <button 
@@ -1876,20 +1956,20 @@ const Chat: React.FC<ChatProps> = ({
                 <div className="space-y-2">
                   <div className="flex items-center justify-between px-1">
                     <span className="text-[10px] font-black uppercase tracking-wider text-neutral-500">
-                      Hasil Pencarian Orang ({users.filter(u => u.id !== currentUser?.id && ((u.name || '').toLowerCase().includes(userSearchQuery.toLowerCase()) || (u.email || '').toLowerCase().includes(userSearchQuery.toLowerCase()))).length})
+                      Hasil Pencarian Orang ({users.filter(u => u.id !== currentUser?.id && isMutual(u.id) && ((u.name || '').toLowerCase().includes(userSearchQuery.toLowerCase()) || (u.email || '').toLowerCase().includes(userSearchQuery.toLowerCase()))).length})
                     </span>
                   </div>
 
-                  {users.filter(u => u.id !== currentUser?.id && ((u.name || '').toLowerCase().includes(userSearchQuery.toLowerCase()) || (u.email || '').toLowerCase().includes(userSearchQuery.toLowerCase()))).length === 0 ? (
+                  {users.filter(u => u.id !== currentUser?.id && isMutual(u.id) && ((u.name || '').toLowerCase().includes(userSearchQuery.toLowerCase()) || (u.email || '').toLowerCase().includes(userSearchQuery.toLowerCase()))).length === 0 ? (
                     <div className="text-center py-10 bg-white rounded-3xl border border-neutral-200/80 p-6 space-y-2">
                       <div className="w-12 h-12 rounded-full bg-neutral-100 flex items-center justify-center text-neutral-400 text-lg mx-auto">
                         <i className="fas fa-user-slash"></i>
                       </div>
                       <p className="text-xs font-bold text-neutral-800">Tidak ada pengguna ditemukan</p>
-                      <p className="text-[10px] text-neutral-500">Coba kata kunci nama atau username lain.</p>
+                      <p className="text-[10px] text-neutral-500">Hanya teman yang saling follow balik yang dapat dicari untuk obrolan chat.</p>
                     </div>
                   ) : (
-                    users.filter(u => u.id !== currentUser?.id && ((u.name || '').toLowerCase().includes(userSearchQuery.toLowerCase()) || (u.email || '').toLowerCase().includes(userSearchQuery.toLowerCase()))).map(u => {
+                    users.filter(u => u.id !== currentUser?.id && isMutual(u.id) && ((u.name || '').toLowerCase().includes(userSearchQuery.toLowerCase()) || (u.email || '').toLowerCase().includes(userSearchQuery.toLowerCase()))).map(u => {
                       const uOnline = isUserOnline(u.id);
                       const isMutualUser = isMutual(u.id);
                       const isFollowed = (currentUser?.following || []).includes(u.id);
@@ -1952,9 +2032,9 @@ const Chat: React.FC<ChatProps> = ({
                       <div className="w-12 h-12 rounded-full bg-neutral-200/70 text-neutral-600 flex items-center justify-center text-lg mx-auto shadow-inner">
                         <i className="fas fa-users-rays"></i>
                       </div>
-                      <h4 className="font-black text-xs uppercase text-neutral-900">Belum Ada Teman Saling Follow</h4>
+                      <h4 className="font-black text-xs uppercase text-neutral-900">Belum Ada Kontak Chat</h4>
                       <p className="text-xs text-neutral-500 max-w-xs mx-auto leading-relaxed">
-                        Gunakan kolom pencarian di atas untuk mencari dan mengirim pesan ke pengguna lain!
+                        Hanya pengguna yang saling follow balik (teman mutual) yang dapat dihubungi melalui obrolan chat!
                       </p>
                     </div>
                   ) : (
@@ -2150,7 +2230,7 @@ const Chat: React.FC<ChatProps> = ({
                   <i className="fas fa-search absolute left-3.5 top-1/2 -translate-y-1/2 text-neutral-400 text-xs"></i>
                   <input
                     type="text"
-                    placeholder="Cari grup collective Anda..."
+                    placeholder="Cari grup Anda..."
                     value={collectiveSearchQuery}
                     onChange={(e) => setCollectiveSearchQuery(e.target.value)}
                     className="w-full bg-white border border-neutral-200 pl-9 pr-8 py-2.5 rounded-2xl text-xs font-bold focus:outline-none focus:border-black shadow-xs"
@@ -2171,7 +2251,7 @@ const Chat: React.FC<ChatProps> = ({
                   <div className="w-14 h-14 rounded-full bg-neutral-200 text-neutral-600 flex items-center justify-center text-xl mx-auto shadow-inner">
                     <i className="fas fa-users-viewfinder"></i>
                   </div>
-                  <h4 className="font-extrabold text-sm uppercase text-neutral-900">Belum Ada Grup Collective</h4>
+                  <h4 className="font-extrabold text-sm uppercase text-neutral-900">Belum Ada Grup</h4>
                   <p className="text-xs text-neutral-500 max-w-xs mx-auto">
                     Buat grup obrolan baru bersama teman-teman yang Anda follow dengan menekan tombol plus di pojok kanan atas.
                   </p>
@@ -2789,12 +2869,12 @@ const Chat: React.FC<ChatProps> = ({
                 value={msg}
                 onChange={e => handleInputChange(e.target.value)}
                 onKeyDown={e => {
-                  if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey) {
+                  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
                     e.preventDefault();
                     handleSend(e);
                   }
                 }}
-                placeholder={selectedMedia ? "Tambahkan keterangan / caption..." : "Ketik pesan... (Shift+Enter untuk baris baru)"}
+                placeholder={selectedMedia ? "Tambahkan keterangan / caption..." : "Ketik pesan... (Enter untuk baris baru, Ctrl+Enter untuk kirim)"}
                 className="w-full bg-transparent text-sm focus:outline-none resize-none leading-relaxed max-h-28 placeholder:text-neutral-400 py-1"
                 style={{ minHeight: '28px' }}
               />

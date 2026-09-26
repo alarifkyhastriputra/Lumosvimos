@@ -64,7 +64,7 @@ export default function Notifications({
     <div className="p-4">
       <div className="flex items-center justify-between mb-8">
         <div>
-          <h2 className="text-3xl font-black uppercase tracking-tighter">Echoes</h2>
+          <h2 className="text-3xl font-black uppercase tracking-tighter">Vimos</h2>
           <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Recent activity in your orbit</p>
         </div>
         {notifications.some(n => !n.read) && (

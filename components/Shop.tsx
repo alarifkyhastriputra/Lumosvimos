@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { User, UserShop, ShopItem, ShopOrder, SellerApplication } from '../types.ts';
 import { useLanguage } from '../LanguageContext.tsx';
-import { ref, onValue, push, set, update, remove, serverTimestamp } from 'firebase/database';
+import { ref, onValue, push, set, update, remove, serverTimestamp, get, query, limitToLast } from 'firebase/database';
 import { db } from '../firebase.ts';
 import { compressImage } from '../services/imageCompressor.ts';
 
@@ -136,8 +136,55 @@ export const Shop: React.FC<ShopProps> = ({ currentUser, onUpdateUser, onNavigat
   useEffect(() => {
     const shopsRef = ref(db, 'shops');
     const itemsRef = ref(db, 'shopItems');
-    const ordersRef = ref(db, 'shopOrders');
+    const ordersRef = query(ref(db, 'shopOrders'), limitToLast(120));
     const myAppRef = ref(db, `sellerApplications/${currentUser.id}`);
+
+    // Fast direct fetches for instantaneous load speeds
+    get(shopsRef).then((snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const list: UserShop[] = Object.entries(data).map(([id, val]: [string, any]) => ({
+          id,
+          ...val
+        }));
+        setShops(list.sort((a, b) => b.createdAt - a.createdAt));
+      }
+    }).catch(() => {});
+
+    get(itemsRef).then((snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const list: ShopItem[] = Object.entries(data).map(([id, val]: [string, any]) => ({
+          id,
+          ...val
+        }));
+        setItems(list.sort((a, b) => b.createdAt - a.createdAt));
+      }
+      setLoadingData(false);
+    }).catch(() => {
+      setLoadingData(false);
+    });
+
+    get(ordersRef).then((snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const list: ShopOrder[] = Object.entries(data).map(([id, val]: [string, any]) => ({
+          id,
+          ...val
+        }));
+        setOrders(list.sort((a, b) => b.timestamp - a.timestamp));
+      }
+    }).catch(() => {});
+
+    get(myAppRef).then((snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        setMyApplication(data as SellerApplication);
+        if (data.status === 'approved' && !currentUser.isVerifiedSeller) {
+          onUpdateUser({ isVerifiedSeller: true, sellerStatus: 'approved' });
+        }
+      }
+    }).catch(() => {});
 
     const unsubShops = onValue(shopsRef, (snapshot) => {
       const data = snapshot.val();

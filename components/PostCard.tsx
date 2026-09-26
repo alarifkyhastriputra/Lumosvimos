@@ -372,8 +372,11 @@ const PostCard: React.FC<PostCardProps> = ({
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center space-x-2 flex-wrap gap-y-1">
-            <h3 className="font-bold text-sm cursor-pointer hover:underline truncate" onClick={() => onUserClick(post.userId)}>
-              {displayAuthorName}
+            <h3 className="font-bold text-sm cursor-pointer hover:underline truncate flex items-center" onClick={() => onUserClick(post.userId)}>
+              <span>{displayAuthorName}</span>
+              {(postUser?.isVerifiedSeller === true || postUser?.sellerStatus === 'approved') && (
+                <i className="fas fa-circle-check text-blue-500 text-xs ml-1.5" title="Verified Merchant"></i>
+              )}
             </h3>
             
             {/* Custom Role Badge with color */}

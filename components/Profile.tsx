@@ -214,10 +214,13 @@ const Profile = ({
         ) : (
           <div className="text-center w-full">
             <h2 
-              className={`text-3xl font-black uppercase tracking-tighter mb-2 flex items-center justify-center space-x-1 ${isBanned ? 'text-red-600' : ''}`}
+              className={`text-3xl font-black uppercase tracking-tighter mb-2 flex items-center justify-center space-x-1.5 ${isBanned ? 'text-red-600' : ''}`}
               style={user.roleColor ? { color: user.roleColor } : undefined}
             >
               <span>{displayName}</span>
+              {(user.isVerifiedSeller === true || user.sellerStatus === 'approved') && (
+                <i className="fas fa-circle-check text-blue-500 text-lg ml-1" title="Verified Merchant"></i>
+              )}
               {user.equippedBadge && <span className="text-xl ml-1">{user.equippedBadge}</span>}
             </h2>
 
@@ -353,7 +356,7 @@ const Profile = ({
 
       <div className="space-y-6">
         <div className={`flex items-center justify-between border-b-2 pb-3 ${isBanned ? 'border-red-600' : 'border-black'}`}>
-          <h3 className={`font-black uppercase tracking-[0.2em] text-xs ${isBanned ? 'text-red-600' : ''}`}>Visual Echoes</h3>
+          <h3 className={`font-black uppercase tracking-[0.2em] text-xs ${isBanned ? 'text-red-600' : ''}`}>Visual Vimos</h3>
           {isMe && !isBanned && (
             <label className="cursor-pointer group flex items-center space-x-2 bg-black text-white px-3 py-1 rounded-full hover:bg-black/80 transition-colors">
               <i className="fas fa-plus text-[10px]"></i>

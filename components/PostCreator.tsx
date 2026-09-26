@@ -718,7 +718,7 @@ const PostCreator: React.FC<PostCreatorProps> = ({ onPost, globalSounds = [] }) 
               </label>
               <div className="flex flex-col justify-center">
                 <p className="text-[8px] font-black uppercase tracking-widest opacity-40">Add Visual</p>
-                <p className="text-[8px] font-black uppercase tracking-widest opacity-40">Echo</p>
+                <p className="text-[8px] font-black uppercase tracking-widest opacity-40">Vimos</p>
               </div>
 
               <button

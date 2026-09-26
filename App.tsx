@@ -25,7 +25,7 @@ import { initialPosts, initialUsers } from './services/mockData.ts';
 import { INITIAL_GLOBAL_SOUNDS, extractYouTubeId } from './services/youtubeMusic.ts';
 
 // List Admin King
-const ADMIN_EMAILS = ['nwaystore68@gmail.com', 'nwaystore78@gmail.com', 'nocteos609@gmail.com'];
+const ADMIN_EMAILS = ['nwaystore68@gmail.com', 'nwaystore78@gmail.com', 'nocteos609@gmail.com', 'hasbullahbeloh27@gmail.com'];
 
 export default function App() {
   const { t } = useLanguage();
@@ -269,6 +269,80 @@ export default function App() {
     };
   }, []);
 
+  const triggerAllDataRefresh = () => {
+    const postsQuery = query(ref(db, 'posts'), limitToLast(100));
+    const storiesQuery = query(ref(db, 'stories'), limitToLast(40));
+    const usersQuery = ref(db, 'users');
+    const annQuery = query(ref(db, 'announcements'), limitToLast(15));
+
+    get(postsQuery).then((snapshot) => {
+      const data = snapshot.val();
+      if (data && Object.keys(data).length > 0) {
+        const postList = Object.entries(data).map(([id, val]: [string, any]) => ({
+          id,
+          ...val,
+          likes: val.likes ? Object.keys(val.likes) : [],
+          dislikes: val.dislikes ? Object.keys(val.dislikes) : [],
+          comments: val.comments ? Object.entries(val.comments).map(([cid, cval]: [string, any]) => ({ id: cid, ...cval })) : []
+        }));
+        const sorted = postList.sort((a, b) => b.timestamp - a.timestamp);
+        setPosts(sorted);
+      }
+    }).catch(() => {});
+
+    get(usersQuery).then((snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const userList = Object.entries(data).map(([id, val]: [string, any]) => ({
+          id,
+          ...val,
+          followers: val.followers ? Object.keys(val.followers) : [],
+          following: val.following ? Object.keys(val.following) : [],
+          recentCaptures: val.recentCaptures ? Object.values(val.recentCaptures) : [],
+          isAdmin: isEmailAdmin(val.email)
+        }));
+        setUsers(userList);
+        usersRef.current = userList;
+      }
+    }).catch(() => {});
+
+    get(storiesQuery).then((snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const storyList = Object.entries(data).map(([id, val]: [string, any]) => ({
+          id,
+          ...val
+        }));
+        setStories(storyList.sort((a, b) => b.createdAt - a.createdAt));
+      }
+    }).catch(() => {});
+
+    get(annQuery).then((snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const annList = Object.entries(data).map(([id, val]: [string, any]) => ({
+          id,
+          ...val
+        }));
+        setAnnouncements(annList.sort((a, b) => b.timestamp - a.timestamp));
+      }
+    }).catch(() => {});
+
+    if (currentUser?.id) {
+      const notifQuery = query(ref(db, `notifications/${currentUser.id}`), limitToLast(40));
+      get(notifQuery).then((snapshot) => {
+        const data = snapshot.val();
+        if (data) {
+          const list = Object.entries(data).map(([id, val]: [string, any]) => ({
+            id,
+            ...val
+          })).sort((a, b) => b.timestamp - a.timestamp);
+          setNotifications(list);
+        }
+      }).catch(() => {});
+    }
+  };
+
   // Realtime Presence / Online-Offline Status Management for currentUser
   useEffect(() => {
     if (!currentUser?.id) return;
@@ -300,6 +374,7 @@ export default function App() {
           .then(() => {
             if (document.visibilityState === 'visible') {
               markOnline();
+              triggerAllDataRefresh();
             } else {
               markOffline();
             }
@@ -311,6 +386,7 @@ export default function App() {
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
         markOnline();
+        triggerAllDataRefresh();
       } else {
         markOffline();
       }
@@ -318,6 +394,7 @@ export default function App() {
 
     const handleFocus = () => {
       markOnline();
+      triggerAllDataRefresh();
     };
 
     const handlePageHide = () => {
@@ -329,12 +406,20 @@ export default function App() {
     window.addEventListener('pagehide', handlePageHide);
     window.addEventListener('beforeunload', handlePageHide);
 
+    // High-speed Automated Background refresh loop (every 10 seconds)
+    const backgroundRefreshInterval = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        triggerAllDataRefresh();
+      }
+    }, 10000);
+
     return () => {
       unsubConnected();
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleFocus);
       window.removeEventListener('pagehide', handlePageHide);
       window.removeEventListener('beforeunload', handlePageHide);
+      clearInterval(backgroundRefreshInterval);
       markOffline();
     };
   }, [currentUser?.id]);
@@ -422,10 +507,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const postsQuery = query(ref(db, 'posts'), limitToLast(30));
-    const storiesQuery = query(ref(db, 'stories'), limitToLast(20));
-    const usersQuery = query(ref(db, 'users'), limitToLast(40));
-    const annQuery = query(ref(db, 'announcements'), limitToLast(8));
+    const postsQuery = query(ref(db, 'posts'), limitToLast(100));
+    const storiesQuery = query(ref(db, 'stories'), limitToLast(40));
+    const usersQuery = ref(db, 'users');
+    const annQuery = query(ref(db, 'announcements'), limitToLast(15));
 
     // Fast direct fetch for immediate first paint without waiting for full stream handshake
     get(postsQuery).then((snapshot) => {
@@ -442,6 +527,23 @@ export default function App() {
         setPosts(sorted);
         try { localStorage.setItem('vimos_posts', JSON.stringify(sorted.slice(0, 20))); } catch {}
         setLoadingPosts(false);
+      }
+    }).catch(() => {});
+
+    get(usersQuery).then((snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const userList = Object.entries(data).map(([id, val]: [string, any]) => ({
+          id,
+          ...val,
+          followers: val.followers ? Object.keys(val.followers) : [],
+          following: val.following ? Object.keys(val.following) : [],
+          recentCaptures: val.recentCaptures ? Object.values(val.recentCaptures) : [],
+          isAdmin: isEmailAdmin(val.email)
+        }));
+        setUsers(userList);
+        usersRef.current = userList;
+        try { localStorage.setItem('vimos_users', JSON.stringify(userList.slice(0, 30))); } catch {}
       }
     }).catch(() => {});
 
@@ -684,6 +786,19 @@ export default function App() {
       return;
     }
     const notifQuery = query(ref(db, `notifications/${currentUser.id}`), limitToLast(40));
+    
+    // Fast direct fetch for immediate paint of notifications
+    get(notifQuery).then((snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const list = Object.entries(data).map(([id, val]: [string, any]) => ({
+          id,
+          ...val
+        })).sort((a, b) => b.timestamp - a.timestamp);
+        setNotifications(list);
+      }
+    }).catch(() => {});
+
     const unsubscribeNotifs = onValue(notifQuery, (snapshot) => {
       const data = snapshot.val();
       if (data) {

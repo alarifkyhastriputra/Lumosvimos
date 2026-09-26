@@ -273,7 +273,7 @@ const translations: Record<Language, Record<string, string>> = {
     'start_voice_call': 'Voice Call',
     'start_video_call': 'Video Call',
     'join_call': 'Join Call',
-    'active_call_desc': 'There is an active call in this collective.',
+    'active_call_desc': 'There is an active call in this group.',
     'live_stream': 'Live Stream',
     'go_live': 'Go Live',
     'live_video': 'Live Camera Video',

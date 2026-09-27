@@ -8,10 +8,13 @@ interface HeaderProps {
   users: User[];
   onUserClick: (userId: string) => void;
   onLeaderboardClick: () => void;
+  onQuestClick?: () => void;
   onShopClick?: () => void;
   isAdmin?: boolean;
   onAdminClick?: () => void;
   userCoins?: number;
+  userXp?: number;
+  seasonRank?: string;
 }
 
 const Header: React.FC<HeaderProps> = ({ 
@@ -19,10 +22,13 @@ const Header: React.FC<HeaderProps> = ({
   users, 
   onUserClick, 
   onLeaderboardClick, 
+  onQuestClick,
   onShopClick,
   isAdmin, 
   onAdminClick,
-  userCoins = 500
+  userCoins = 500,
+  userXp = 0,
+  seasonRank = 'Bronze I'
 }) => {
   const { t } = useLanguage();
   const [query, setQuery] = useState('');
@@ -109,6 +115,20 @@ const Header: React.FC<HeaderProps> = ({
         </div>
 
         <div className="flex items-center shrink-0 space-x-1.5">
+          {onQuestClick && (
+            <button 
+              onClick={onQuestClick}
+              className="h-8 px-2 sm:px-2.5 flex items-center justify-center space-x-1.5 border border-amber-400 bg-amber-400/15 hover:bg-amber-400 text-amber-950 rounded-full transition-all active:scale-90 shadow-2xs font-black cursor-pointer"
+              title={`Pusat Quest (${userXp.toLocaleString()} XP • ${seasonRank})`}
+            >
+              <i className="fas fa-scroll text-amber-600 text-xs"></i>
+              <span className="text-[10px] uppercase hidden sm:inline tracking-tight font-black">Quest</span>
+              <span className="text-[9px] px-1.5 py-0.2 bg-amber-400 text-black rounded-full font-black font-mono">
+                {userXp > 999 ? `${(userXp / 1000).toFixed(1)}k` : userXp} XP
+              </span>
+            </button>
+          )}
+
           <button 
             onClick={onLeaderboardClick}
             className="w-8 h-8 flex items-center justify-center border border-neutral-300 rounded-full hover:bg-black hover:text-white transition-all active:scale-90 text-neutral-800"

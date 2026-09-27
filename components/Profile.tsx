@@ -6,6 +6,7 @@ import PostCard from './PostCard.tsx';
 import { useLanguage } from '../LanguageContext.tsx';
 import { SHOP_ITEMS } from './Shop.tsx';
 import { compressImage } from '../services/imageCompressor.ts';
+import { calculateUserRank } from '../services/rankService.ts';
 
 interface ProfileProps {
   user: User;
@@ -227,7 +228,27 @@ const Profile = ({
             </h2>
 
             {/* Online / Offline Presence Badge */}
-            <div className="flex items-center justify-center space-x-2 mb-2">
+            <div className="flex flex-wrap items-center justify-center gap-2 mb-3">
+              {/* Rank Badge Pill */}
+              {(() => {
+                const rankInfo = calculateUserRank(user.seasonXp || 0);
+                return (
+                  <div className="inline-flex items-center space-x-1.5 px-3 py-1 bg-neutral-900 text-white border border-neutral-700 rounded-full text-[10px] font-black shadow-xs">
+                    <img src={rankInfo.tier.badgeUrl} alt={rankInfo.tier.name} className="w-3.5 h-3.5 object-contain" />
+                    <span className="text-amber-400">{rankInfo.divisionName}</span>
+                    <span className="text-neutral-400">• {(user.seasonXp || 0).toLocaleString()} XP</span>
+                  </div>
+                );
+              })()}
+
+              {/* Special Rank Badge */}
+              {user.specialRank && (
+                <span className="inline-flex items-center space-x-1 px-2.5 py-1 bg-black text-yellow-400 border border-yellow-400/40 rounded-full text-[9px] font-black uppercase tracking-wider shadow-2xs">
+                  <i className="fas fa-crown text-[8px]"></i>
+                  <span>{user.specialRank}</span>
+                </span>
+              )}
+
               {user.isOnline ? (
                 <span className="inline-flex items-center space-x-1.5 px-3 py-1 bg-emerald-50 border border-emerald-200 rounded-full text-[10px] font-bold text-emerald-600 shadow-2xs">
                   <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>

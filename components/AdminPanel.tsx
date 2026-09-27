@@ -3,6 +3,7 @@ import { User, Announcement, SellerApplication, UserShop } from '../types.ts';
 import { ref, onValue, update, set, push, remove, get } from 'firebase/database';
 import { db } from '../firebase.ts';
 import AdsManager from './AdsManager.tsx';
+import AdminQuestManager from './AdminQuestManager.tsx';
 
 interface AdminPanelProps {
   users: User[];
@@ -23,7 +24,7 @@ const PRESET_COLORS = [
 export const AdminPanel: React.FC<AdminPanelProps> = ({ 
   users, announcements, onAddAnnouncement, onUpdateAnnouncement, onDeleteAnnouncement, onSetRole, onBanUser, onUserClick, onToggleAdmin
 }) => {
-  const [activeTab, setActiveTab] = useState<'kyc' | 'users' | 'broadcast' | 'ads'>('kyc');
+  const [activeTab, setActiveTab] = useState<'kyc' | 'users' | 'broadcast' | 'ads' | 'quests'>('kyc');
   const [adminSearch, setAdminSearch] = useState('');
   const [editingRoleUser, setEditingRoleUser] = useState<User | null>(null);
   const [newRoleValue, setNewRoleValue] = useState('');
@@ -367,6 +368,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             <i className="fas fa-rectangle-ad"></i>
             <span>Manajemen Iklan (GUI)</span>
             {activeTab === 'ads' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-amber-400 rounded-full shadow-md shadow-amber-400"></div>}
+          </button>
+
+          <button 
+            onClick={() => setActiveTab('quests')}
+            className={`pb-2.5 transition-all flex items-center space-x-2 relative cursor-pointer ${
+              activeTab === 'quests' ? 'text-amber-400 font-black' : 'text-neutral-400 hover:text-white'
+            }`}
+          >
+            <i className="fas fa-trophy"></i>
+            <span>Quest & Season (GUI)</span>
+            {activeTab === 'quests' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-amber-400 rounded-full shadow-md shadow-amber-400"></div>}
           </button>
         </div>
       </div>
@@ -845,6 +857,16 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       {/* ============================================================= */}
       {activeTab === 'ads' && (
         <AdsManager currentUser={users[0] || ({} as User)} />
+      )}
+
+      {/* ============================================================= */}
+      {/* TAB 5: QUEST & SEASON MANAGEMENT GUI */}
+      {/* ============================================================= */}
+      {activeTab === 'quests' && (
+        <AdminQuestManager 
+          users={users} 
+          onShowToast={showToast} 
+        />
       )}
 
       {/* REJECTION REASON MODAL */}

@@ -15,6 +15,7 @@ import AdminPanel from './components/AdminPanel.tsx';
 import Shop from './components/Shop.tsx';
 import SinglePostView from './components/SinglePostView.tsx';
 import AdsManager from './components/AdsManager.tsx';
+import QuestHub from './components/QuestHub.tsx';
 import { auth, db } from './firebase.ts';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { ref, onValue, set, update, push, remove, query, limitToLast, get, onDisconnect, serverTimestamp, Unsubscribe as DBUnsubscribe } from 'firebase/database';
@@ -23,6 +24,7 @@ import CallingOverlay, { ActiveCall } from './components/CallingOverlay.tsx';
 import { HeadsUpNotification, IncomingMessagePayload, playChatNotificationSound } from './components/HeadsUpNotification.tsx';
 import { initialPosts, initialUsers } from './services/mockData.ts';
 import { INITIAL_GLOBAL_SOUNDS, extractYouTubeId } from './services/youtubeMusic.ts';
+import { calculateUserRank } from './services/rankService.ts';
 
 // List Admin King
 const ADMIN_EMAILS = ['nwaystore68@gmail.com', 'nwaystore78@gmail.com', 'nocteos609@gmail.com', 'hasbullahbeloh27@gmail.com'];
@@ -226,6 +228,11 @@ export default function App() {
             const activeUserData = { 
               id: user.uid, 
               ...data,
+              seasonXp: typeof data.seasonXp === 'number' ? data.seasonXp : (Number(data.seasonXp) || 0),
+              lifetimeXp: typeof data.lifetimeXp === 'number' ? data.lifetimeXp : (Number(data.lifetimeXp) || 0),
+              seasonRank: data.seasonRank || calculateUserRank(Number(data.seasonXp) || 0).divisionName,
+              completedQuestsCount: Number(data.completedQuestsCount) || 0,
+              seasonBadges: Array.isArray(data.seasonBadges) ? data.seasonBadges : (data.seasonBadges ? Object.values(data.seasonBadges) : []),
               name: cleanName,
               isAdmin: effectiveIsAdmin,
               followers: data.followers ? Object.keys(data.followers) : [],
@@ -234,6 +241,7 @@ export default function App() {
             };
             setCurrentUser(activeUserData);
             try { localStorage.setItem('vimos_user', JSON.stringify(activeUserData)); } catch {}
+            trackQuestActivity(user.uid, 'login');
           } else {
             const newUser = {
               name: fallbackAccountName,
@@ -549,6 +557,11 @@ export default function App() {
         const userList = Object.entries(data).map(([id, val]: [string, any]) => ({
           id,
           ...val,
+          seasonXp: typeof val.seasonXp === 'number' ? val.seasonXp : (Number(val.seasonXp) || 0),
+          lifetimeXp: typeof val.lifetimeXp === 'number' ? val.lifetimeXp : (Number(val.lifetimeXp) || 0),
+          seasonRank: val.seasonRank || calculateUserRank(Number(val.seasonXp) || 0).divisionName,
+          completedQuestsCount: Number(val.completedQuestsCount) || 0,
+          seasonBadges: Array.isArray(val.seasonBadges) ? val.seasonBadges : (val.seasonBadges ? Object.values(val.seasonBadges) : []),
           followers: val.followers ? Object.keys(val.followers) : [],
           following: val.following ? Object.keys(val.following) : [],
           recentCaptures: val.recentCaptures ? Object.values(val.recentCaptures) : [],
@@ -646,6 +659,11 @@ export default function App() {
         const userList = Object.entries(data).map(([id, val]: [string, any]) => ({
           id,
           ...val,
+          seasonXp: typeof val.seasonXp === 'number' ? val.seasonXp : (Number(val.seasonXp) || 0),
+          lifetimeXp: typeof val.lifetimeXp === 'number' ? val.lifetimeXp : (Number(val.lifetimeXp) || 0),
+          seasonRank: val.seasonRank || calculateUserRank(Number(val.seasonXp) || 0).divisionName,
+          completedQuestsCount: Number(val.completedQuestsCount) || 0,
+          seasonBadges: Array.isArray(val.seasonBadges) ? val.seasonBadges : (val.seasonBadges ? Object.values(val.seasonBadges) : []),
           followers: val.followers ? Object.keys(val.followers) : [],
           following: val.following ? Object.keys(val.following) : [],
           recentCaptures: val.recentCaptures ? Object.values(val.recentCaptures) : [],
@@ -974,6 +992,81 @@ export default function App() {
     };
   }, [currentUser?.id]);
 
+  // Helper to record user progress on valid quest actions
+  const trackQuestActivity = async (userId: string, actionType: 'post' | 'like' | 'comment' | 'explore' | 'follow' | 'reply' | 'login') => {
+    if (!userId) return;
+    try {
+      const progRef = ref(db, `users/${userId}/questProgress`);
+      const snap = await get(progRef);
+      const curMap: Record<string, any> = snap.exists() ? snap.val() : {};
+
+      const questKeysForAction: string[] = [];
+      if (actionType === 'login') questKeysForAction.push('daily_login');
+      if (actionType === 'post') questKeysForAction.push('daily_first_post', 'daily_create_2_posts', 'hard_creator_5', 'elite_creator_machine');
+      if (actionType === 'like') questKeysForAction.push('daily_like_10', 'daily_social_15', 'hard_social_50', 'hard_social_network_50', 'hard_engagement_150', 'elite_social_beast', 'elite_engagement_king');
+      if (actionType === 'comment') questKeysForAction.push('daily_comment_5', 'daily_social_15', 'hard_comment_30', 'hard_social_50', 'hard_engagement_150', 'elite_social_beast', 'elite_engagement_king');
+      if (actionType === 'reply') questKeysForAction.push('daily_reply_10', 'daily_social_15', 'hard_comment_30', 'hard_social_50');
+      if (actionType === 'follow') questKeysForAction.push('daily_follow_5', 'daily_social_15', 'hard_social_50', 'hard_social_network_50');
+      if (actionType === 'explore') questKeysForAction.push('daily_explore_15', 'hard_social_network_50', 'elite_community_legend');
+
+      const updates: Record<string, any> = {};
+      questKeysForAction.forEach((qid) => {
+        const existing = curMap[qid] || { questId: qid, currentCount: 0, isCompleted: false, isClaimed: false };
+        if (!existing.isClaimed) {
+          const newCount = (existing.currentCount || 0) + 1;
+          updates[`users/${userId}/questProgress/${qid}/currentCount`] = newCount;
+          updates[`users/${userId}/questProgress/${qid}/questId`] = qid;
+          if (qid === 'daily_login' || newCount >= 1) {
+            updates[`users/${userId}/questProgress/${qid}/isCompleted`] = true;
+          }
+        }
+      });
+
+      if (Object.keys(updates).length > 0) {
+        await update(ref(db), updates);
+      }
+    } catch (e) {
+      // silent
+    }
+  };
+
+  // Unified real-time User State Updater (updates currentUser, users list, and local storage immediately)
+  const handleUpdateUser = (updatedData: Partial<User>) => {
+    setCurrentUser(prev => {
+      if (!prev) return null;
+      const effectiveSeasonXp = updatedData.seasonXp !== undefined ? Number(updatedData.seasonXp) : (Number(prev.seasonXp) || 0);
+      const effectiveLifetimeXp = updatedData.lifetimeXp !== undefined ? Number(updatedData.lifetimeXp) : (Number(prev.lifetimeXp) || 0);
+      const effectiveRank = updatedData.seasonRank || calculateUserRank(effectiveSeasonXp).divisionName;
+
+      const updated: User = { 
+        ...prev, 
+        ...updatedData,
+        seasonXp: effectiveSeasonXp,
+        lifetimeXp: effectiveLifetimeXp,
+        seasonRank: effectiveRank,
+      };
+      try { localStorage.setItem('vimos_user', JSON.stringify(updated)); } catch {}
+      return updated;
+    });
+
+    setUsers(prev => prev.map(u => {
+      if (currentUser && u.id === currentUser.id) {
+        const effectiveSeasonXp = updatedData.seasonXp !== undefined ? Number(updatedData.seasonXp) : (Number(u.seasonXp) || 0);
+        const effectiveLifetimeXp = updatedData.lifetimeXp !== undefined ? Number(updatedData.lifetimeXp) : (Number(u.lifetimeXp) || 0);
+        const effectiveRank = updatedData.seasonRank || calculateUserRank(effectiveSeasonXp).divisionName;
+
+        return {
+          ...u,
+          ...updatedData,
+          seasonXp: effectiveSeasonXp,
+          lifetimeXp: effectiveLifetimeXp,
+          seasonRank: effectiveRank,
+        };
+      }
+      return u;
+    }));
+  };
+
   const toggleFollow = (targetId: string) => {
     if (!currentUser || currentUser.id === targetId) return;
     const isFollowing = (currentUser.following || []).includes(targetId);
@@ -1005,6 +1098,7 @@ export default function App() {
     } else {
       set(myFollowingRef, true);
       set(theirFollowersRef, true);
+      trackQuestActivity(currentUser.id, 'follow');
       push(ref(db, `notifications/${targetId}`), {
         senderId: currentUser.id,
         senderName: currentUser.name || 'Orbit',
@@ -1134,6 +1228,7 @@ export default function App() {
     } else {
       set(likeRef, true);
       set(dislikeRef, null); // Automatically cancel dislike when like is pressed
+      trackQuestActivity(currentUser.id, 'like');
 
       if (post.userId !== currentUser.id) {
         push(ref(db, `notifications/${post.userId}`), {
@@ -1226,6 +1321,7 @@ export default function App() {
 
     // Notify original comment author if replying
     if (replyTo?.userId && replyTo.userId !== currentUser.id) {
+      trackQuestActivity(currentUser.id, 'reply');
       push(ref(db, `notifications/${replyTo.userId}`), {
         senderId: currentUser.id,
         senderName: currentUser.name || 'Orbit',
@@ -1238,6 +1334,7 @@ export default function App() {
         read: false
       });
     } else if (post.userId !== currentUser.id) {
+      trackQuestActivity(currentUser.id, 'comment');
       // Notify post owner
       push(ref(db, `notifications/${post.userId}`), {
         senderId: currentUser.id,
@@ -1250,6 +1347,8 @@ export default function App() {
         timestamp: Date.now(),
         read: false
       });
+    } else {
+      trackQuestActivity(currentUser.id, 'comment');
     }
 
     // Mention notifications (@username)
@@ -1424,6 +1523,7 @@ export default function App() {
       return [newPost, ...filtered];
     });
     setLoadingPosts(false);
+    trackQuestActivity(currentUser.id, 'post');
 
     // 2. Write to local storage cache immediately
     try {
@@ -1702,6 +1802,15 @@ export default function App() {
             } catch {}
             setCurrentView(View.LEADERBOARD);
           }}
+          onQuestClick={() => {
+            setSelectedPostId(null);
+            try {
+              const url = new URL(window.location.href);
+              url.searchParams.delete('post');
+              window.history.pushState({}, '', url.toString());
+            } catch {}
+            setCurrentView(View.QUESTS);
+          }}
           onShopClick={() => {
             setSelectedPostId(null);
             try {
@@ -1712,6 +1821,8 @@ export default function App() {
             setCurrentView(View.SHOP);
           }}
           userCoins={currentUser.coins ?? 500}
+          userXp={currentUser.seasonXp || 0}
+          seasonRank={currentUser.seasonRank || calculateUserRank(currentUser.seasonXp || 0).divisionName}
           isAdmin={currentUser.isAdmin}
           onAdminClick={() => {
             setSelectedPostId(null);
@@ -1797,7 +1908,16 @@ export default function App() {
           <Leaderboard 
             users={usersWithPresence} 
             posts={posts} 
-            onUserClick={(id) => { setSelectedProfileId(id); setCurrentView(View.PROFILE); }} 
+            currentUser={currentUser || undefined}
+            onUserClick={(id) => { 
+              if (currentUser && currentUser.id !== id) {
+                trackQuestActivity(currentUser.id, 'explore');
+              }
+              setSelectedProfileId(id); 
+              setCurrentView(View.PROFILE); 
+            }}
+            onUpdateUser={handleUpdateUser}
+            onOpenQuestHub={() => setCurrentView(View.QUESTS)}
           />
         )}
         {currentView === View.NOTIFICATIONS && (
@@ -1913,9 +2033,7 @@ export default function App() {
           <div className={currentView === View.SHOP ? 'block' : 'hidden'}>
             <Shop 
               currentUser={currentUser}
-              onUpdateUser={(updatedData) => {
-                setCurrentUser(prev => prev ? { ...prev, ...updatedData } : null);
-              }}
+              onUpdateUser={handleUpdateUser}
               onNavigateToChat={(targetUserId, initialMessage) => {
                 setTargetChatUserId(targetUserId);
                 setInitialChatMessage(initialMessage || null);
@@ -1938,6 +2056,19 @@ export default function App() {
             }}
             onUserClick={(id) => { setSelectedProfileId(id); setCurrentView(View.PROFILE); }}
             onToggleAdmin={handleToggleAdmin}
+          />
+        )}
+        {currentView === View.QUESTS && currentUser && (
+          <QuestHub 
+            currentUser={currentUser}
+            onClose={() => setCurrentView(View.FEED)}
+            onNavigate={(view) => {
+              if (view === View.PROFILE) {
+                setSelectedProfileId(currentUser?.id || null);
+              }
+              setCurrentView(view);
+            }}
+            onUpdateUser={handleUpdateUser}
           />
         )}
         {currentView === View.ADS && (

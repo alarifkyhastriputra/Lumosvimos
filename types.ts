@@ -27,6 +27,21 @@ export interface User {
   isVerifiedSeller?: boolean; // Approved merchant status
   sellerStatus?: 'unregistered' | 'pending' | 'approved' | 'rejected';
   sellerApplicationId?: string;
+  seasonXp?: number; // Current season XP
+  lifetimeXp?: number; // All-time XP
+  seasonRank?: string; // Current Division Rank e.g. "Bronze I", "Gold II"
+  highestRank?: string; // Highest rank achieved
+  specialRank?: string; // 'verified' | 'creator' | 'champion' | 'og_member' | 'staff' | 'admin'
+  completedQuestsCount?: number;
+  seasonBadges?: string[]; // Permanent unlocked season badges
+  seasonHistory?: Record<string, {
+    seasonNumber: number;
+    seasonName: string;
+    finalRank: string;
+    seasonXp: number;
+    endedAt: number;
+    trophyBadge?: string;
+  }>;
 }
 
 export interface Story {
@@ -260,6 +275,7 @@ export const View = {
   REELS: 'reels',
   POST: 'post',
   LEADERBOARD: 'leaderboard',
+  QUESTS: 'quests',
   NOTIFICATIONS: 'notifications',
   CHAT: 'chat',
   PROFILE: 'profile',

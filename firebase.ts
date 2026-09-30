@@ -1,42 +1,23 @@
-
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { 
-  initializeAuth, 
-  browserLocalPersistence, 
-  indexedDBLocalPersistence, 
-  browserSessionPersistence, 
-  browserPopupRedirectResolver,
-  getAuth 
-} from 'firebase/auth';
+import { getAuth } from 'firebase/auth';
 import { getDatabase } from 'firebase/database';
 import { getAnalytics, isSupported } from 'firebase/analytics';
 
+// Firebase configuration
 export const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyCZIDtUteM2MiESDJd35gaKPHX_Ht1zL6s",
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "projectchat01-d16bc.firebaseapp.com",
-  databaseURL: import.meta.env.VITE_FIREBASE_DATABASE_URL || "https://projectchat01-d16bc-default-rtdb.firebaseio.com",
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "projectchat01-d16bc",
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "projectchat01-d16bc.appspot.com",
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "163313653543",
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:163313653543:web:a34c117ad6ab7be611bb02",
-  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID || "G-XVNJLVW2ST"
+  apiKey: "AIzaSyA3SVbGNE34805jokZxFz6kWlY7do4i4qc",
+  authDomain: "chiutchiyu.firebaseapp.com",
+  databaseURL: "https://chiutchiyu-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "chiutchiyu",
+  storageBucket: "chiutchiyu.firebasestorage.app",
+  messagingSenderId: "685811847893",
+  appId: "1:685811847893:web:55f5f32493b29c1a27085c",
+  measurementId: "G-XN59W189RV"
 };
 
 // Initialize Firebase
 export const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-
-let authInstance;
-try {
-  authInstance = initializeAuth(app, {
-    persistence: [indexedDBLocalPersistence, browserLocalPersistence, browserSessionPersistence],
-    popupRedirectResolver: browserPopupRedirectResolver
-  });
-} catch {
-  authInstance = getAuth(app);
-}
-
-export const auth = authInstance;
-export { browserPopupRedirectResolver };
+export const auth = getAuth(app);
 export const db = getDatabase(app);
 
 // Initialize Firebase Analytics if supported in the browser environment
@@ -46,9 +27,5 @@ if (typeof window !== 'undefined') {
     if (supported) {
       analytics = getAnalytics(app);
     }
-  }).catch(() => {
-    // Graceful fallback if analytics is blocked or unsupported in context
-  });
+  }).catch(() => {});
 }
-
-

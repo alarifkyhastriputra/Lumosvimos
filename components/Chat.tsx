@@ -767,7 +767,31 @@ const Chat: React.FC<ChatProps> = ({
 
     const chatRef = ref(db, chatPath);
 
-    // Instant direct fetch for selected chat messages
+    // Instant direct fetch for selected chat messages (Retain all Shop messages; filter non-shop > 1 month)
+    const oneMonthCutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    const isShopConv = activeTab === 'shop' || (selectedRecipient.data as any)?.isShop;
+
+    const isMessageRetained = (m: any) => {
+      if (isMsgDeletedForUser(m.deletedFor, currentUser.id)) return false;
+      // Toko / Shop messages are permanently preserved (Kecuali Toko)
+      if (isShopConv || m.isShop || m.isShopChat) return true;
+      if (typeof m.text === 'string') {
+        const tLower = m.text.toLowerCase();
+        if (
+          tLower.includes('tertarik untuk membeli') ||
+          tLower.includes('membeli produk') ||
+          tLower.includes('dari toko anda') ||
+          tLower.includes('harga: rp') ||
+          tLower.includes('pesanan toko') ||
+          tLower.includes('order id') ||
+          tLower.includes('produk:')
+        ) {
+          return true;
+        }
+      }
+      return !m.timestamp || getTimestampNum(m.timestamp) >= oneMonthCutoff;
+    };
+
     get(chatRef).then((snapshot) => {
       const data = snapshot.val();
       if (data) {
@@ -776,7 +800,7 @@ const Chat: React.FC<ChatProps> = ({
             id,
             ...val
           }))
-          .filter((m: any) => !isMsgDeletedForUser(m.deletedFor, currentUser.id))
+          .filter(isMessageRetained)
           .sort((a, b) => getTimestampNum(a.timestamp) - getTimestampNum(b.timestamp));
         setMessages(list);
       } else {
@@ -796,7 +820,7 @@ const Chat: React.FC<ChatProps> = ({
             id,
             ...val
           }))
-          .filter((m: any) => !isMsgDeletedForUser(m.deletedFor, currentUser.id))
+          .filter(isMessageRetained)
           .sort((a, b) => getTimestampNum(a.timestamp) - getTimestampNum(b.timestamp));
         setMessages(list);
 

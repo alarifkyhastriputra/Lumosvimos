@@ -4,6 +4,7 @@ import { ref, onValue, update, set, push, remove, get } from 'firebase/database'
 import { db } from '../firebase.ts';
 import AdsManager from './AdsManager.tsx';
 import AdminQuestManager from './AdminQuestManager.tsx';
+import { scanExpiredData, executeDataPrune, PrunePreview, PruneStats } from '../services/dataPruneService.ts';
 
 interface AdminPanelProps {
   users: User[];
@@ -15,6 +16,8 @@ interface AdminPanelProps {
   onBanUser: (userId: string) => void;
   onUserClick: (uid: string) => void;
   onToggleAdmin?: (userId: string, currentStatus: boolean) => void;
+  currentUserId?: string;
+  onTriggerDataRefresh?: () => void;
 }
 
 const PRESET_COLORS = [
@@ -22,13 +25,19 @@ const PRESET_COLORS = [
 ];
 
 export const AdminPanel: React.FC<AdminPanelProps> = ({ 
-  users, announcements, onAddAnnouncement, onUpdateAnnouncement, onDeleteAnnouncement, onSetRole, onBanUser, onUserClick, onToggleAdmin
+  users, announcements, onAddAnnouncement, onUpdateAnnouncement, onDeleteAnnouncement, onSetRole, onBanUser, onUserClick, onToggleAdmin, currentUserId, onTriggerDataRefresh
 }) => {
-  const [activeTab, setActiveTab] = useState<'kyc' | 'users' | 'broadcast' | 'ads' | 'quests'>('kyc');
+  const [activeTab, setActiveTab] = useState<'kyc' | 'users' | 'broadcast' | 'ads' | 'quests' | 'cleanup'>('kyc');
   const [adminSearch, setAdminSearch] = useState('');
   const [editingRoleUser, setEditingRoleUser] = useState<User | null>(null);
   const [newRoleValue, setNewRoleValue] = useState('');
   const [newRoleColor, setNewRoleColor] = useState('#000000');
+  
+  // Data Retention / Pruning States
+  const [prunePreview, setPrunePreview] = useState<PrunePreview | null>(null);
+  const [isScanningPrune, setIsScanningPrune] = useState<boolean>(false);
+  const [isExecutingPrune, setIsExecutingPrune] = useState<boolean>(false);
+  const [lastPruneStats, setLastPruneStats] = useState<PruneStats | null>(null);
   
   const [broadcastText, setBroadcastText] = useState('');
   const [editingAnnId, setEditingAnnId] = useState<string | null>(null);
@@ -86,6 +95,49 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   }, []);
 
   const pendingCount = sellerApplications.filter(a => a.status === 'pending').length;
+
+  // Scan candidate data for 1-month retention
+  const handleScanData = async () => {
+    setIsScanningPrune(true);
+    try {
+      const preview = await scanExpiredData(currentUserId);
+      setPrunePreview(preview);
+    } catch (err) {
+      console.error('Scan error:', err);
+    } finally {
+      setIsScanningPrune(false);
+    }
+  };
+
+  // Auto scan when cleanup tab is selected
+  useEffect(() => {
+    if (activeTab === 'cleanup') {
+      handleScanData();
+    }
+  }, [activeTab]);
+
+  // Execute actual pruning from Firebase RTDB and web state
+  const handleExecutePrune = async () => {
+    if (!window.confirm('Konfirmasi: Hapus seluruh postingan, riwayat chat, dan akun dormant berusia > 1 bulan dari database Firebase? Tindakan ini bersifat permanen untuk mempercepat performa.')) {
+      return;
+    }
+
+    setIsExecutingPrune(true);
+    try {
+      const stats = await executeDataPrune(currentUserId);
+      setLastPruneStats(stats);
+      showToast(`Pembersihan sukses! ${stats.deletedPosts} postingan, ${stats.deletedMessages} chat, dan ${stats.deletedUsers} akun telah dihapus.`, 'success');
+      await handleScanData();
+      if (onTriggerDataRefresh) {
+        onTriggerDataRefresh();
+      }
+    } catch (err) {
+      console.error('Prune error:', err);
+      showToast('Gagal menjalankan pembersihan database.', 'error');
+    } finally {
+      setIsExecutingPrune(false);
+    }
+  };
 
   const filteredUsers = users.filter(u => {
     const safeSearch = (adminSearch || '').toLowerCase();
@@ -379,6 +431,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             <i className="fas fa-trophy"></i>
             <span>Quest & Season (GUI)</span>
             {activeTab === 'quests' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-amber-400 rounded-full shadow-md shadow-amber-400"></div>}
+          </button>
+
+          <button 
+            onClick={() => setActiveTab('cleanup')}
+            className={`pb-2.5 transition-all flex items-center space-x-2 relative cursor-pointer ${
+              activeTab === 'cleanup' ? 'text-amber-400 font-black' : 'text-neutral-400 hover:text-white'
+            }`}
+          >
+            <i className="fas fa-broom"></i>
+            <span>Pembersihan 1 Bulan</span>
+            {activeTab === 'cleanup' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-amber-400 rounded-full shadow-md shadow-amber-400"></div>}
           </button>
         </div>
       </div>
@@ -867,6 +930,167 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           users={users} 
           onShowToast={showToast} 
         />
+      )}
+
+      {/* ============================================================= */}
+      {/* TAB 6: DATA RETENTION CLEANUP (HAPUS DATA > 1 BULAN)          */}
+      {/* ============================================================= */}
+      {activeTab === 'cleanup' && (
+        <div className="space-y-6 animate-fade-in">
+          {/* Header Card */}
+          <div className="bg-gradient-to-r from-neutral-900 to-neutral-950 p-6 rounded-3xl border border-neutral-800 text-white relative overflow-hidden shadow-xl">
+            <div className="flex items-center justify-between mb-3">
+              <span className="bg-amber-400 text-black text-[9px] font-black uppercase px-2.5 py-0.5 rounded-full tracking-wider">
+                ⚡ Optimalisasi Database & Web
+              </span>
+              <span className="text-[11px] text-neutral-400 font-bold">
+                Kebijakan Retensi: 30 Hari (1 Bulan)
+              </span>
+            </div>
+            <h3 className="text-xl sm:text-2xl font-black uppercase tracking-tight text-white mb-2">
+              Pembersihan Data 1 Bulan (Postingan, Chat & Akun)
+            </h3>
+            <p className="text-xs text-neutral-300 max-w-2xl leading-relaxed">
+              Menghapus seluruh postingan, riwayat obrolan/pesan chat, dan akun pengguna tidak aktif yang telah berusia lebih dari 1 bulan (30 hari) secara permanen dari Firebase Realtime Database dan Web client agar performa aplikasi tetap cepat, ringan, dan nyaman.
+            </p>
+          </div>
+
+          {/* Metrics Preview Grid */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className="bg-white p-5 rounded-3xl border border-neutral-200 shadow-sm flex items-center space-x-4">
+              <div className="w-12 h-12 rounded-2xl bg-neutral-100 flex items-center justify-center text-xl text-neutral-800 shrink-0">
+                <i className="fas fa-images"></i>
+              </div>
+              <div>
+                <p className="text-[10px] font-black uppercase text-neutral-400">Postingan &gt; 1 Bulan</p>
+                <p className="text-2xl font-black text-neutral-900">
+                  {isScanningPrune ? '...' : (prunePreview ? prunePreview.expiredPostsCount : '0')}
+                </p>
+                <p className="text-[10px] text-neutral-500 font-medium">Siap dibersihkan</p>
+              </div>
+            </div>
+
+            <div className="bg-white p-5 rounded-3xl border border-neutral-200 shadow-sm flex items-center space-x-4">
+              <div className="w-12 h-12 rounded-2xl bg-neutral-100 flex items-center justify-center text-xl text-neutral-800 shrink-0">
+                <i className="fas fa-comments"></i>
+              </div>
+              <div>
+                <p className="text-[10px] font-black uppercase text-neutral-400">Pesan Chat &gt; 1 Bulan</p>
+                <p className="text-2xl font-black text-neutral-900">
+                  {isScanningPrune ? '...' : (prunePreview ? prunePreview.expiredMessagesCount : '0')}
+                </p>
+                <p className="text-[10px] text-neutral-500 font-medium">Siap dibersihkan</p>
+              </div>
+            </div>
+
+            <div className="bg-white p-5 rounded-3xl border border-neutral-200 shadow-sm flex items-center space-x-4">
+              <div className="w-12 h-12 rounded-2xl bg-neutral-100 flex items-center justify-center text-xl text-neutral-800 shrink-0">
+                <i className="fas fa-user-xmark"></i>
+              </div>
+              <div>
+                <p className="text-[10px] font-black uppercase text-neutral-400">Akun Dormant &gt; 1 Bulan</p>
+                <p className="text-2xl font-black text-neutral-900">
+                  {isScanningPrune ? '...' : (prunePreview ? prunePreview.expiredUsersCount : '0')}
+                </p>
+                <p className="text-[10px] text-neutral-500 font-medium">Tanpa aktivitas 30 hari</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Action Trigger Card */}
+          <div className="bg-white p-6 rounded-3xl border border-neutral-200 shadow-sm space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <div>
+                <h4 className="font-black text-sm text-neutral-900 uppercase">Eksekusi Pembersihan Manual</h4>
+                <p className="text-xs text-neutral-500">
+                  Tekan tombol di samping untuk segera menyapu bersih seluruh data &gt; 30 hari dari database Firebase.
+                </p>
+              </div>
+              <div className="flex items-center space-x-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={handleScanData}
+                  disabled={isScanningPrune || isExecutingPrune}
+                  className="px-4 py-3 rounded-2xl border border-neutral-300 hover:border-black text-neutral-800 text-xs font-bold transition-all flex items-center space-x-2 cursor-pointer disabled:opacity-50"
+                >
+                  <i className={`fas fa-rotate text-xs ${isScanningPrune ? 'animate-spin' : ''}`}></i>
+                  <span>Scan Ulang</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleExecutePrune}
+                  disabled={isExecutingPrune}
+                  className="px-6 py-3 rounded-2xl bg-red-600 hover:bg-red-700 active:scale-95 text-white text-xs font-black uppercase tracking-wider transition-all shadow-md flex items-center space-x-2 cursor-pointer disabled:opacity-50"
+                >
+                  {isExecutingPrune ? (
+                    <>
+                      <i className="fas fa-circle-notch fa-spin text-xs"></i>
+                      <span>Membersihkan Firebase...</span>
+                    </>
+                  ) : (
+                    <>
+                      <i className="fas fa-trash-can text-xs"></i>
+                      <span>Bersihkan Data &gt; 1 Bulan</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* Results Alert */}
+            {lastPruneStats && (
+              <div className="p-4 bg-emerald-50 border border-emerald-300 text-emerald-900 rounded-2xl text-xs space-y-1 animate-fade-in">
+                <div className="flex items-center space-x-2 font-black text-emerald-800">
+                  <i className="fas fa-circle-check text-sm text-emerald-600"></i>
+                  <span>Pembersihan Database Berhasil Diselesaikan!</span>
+                </div>
+                <p className="text-[11px] text-emerald-700">
+                  Berhasil menghapus: <strong>{lastPruneStats.deletedPosts} postingan</strong>, <strong>{lastPruneStats.deletedMessages} pesan/chat</strong>, dan <strong>{lastPruneStats.deletedUsers} akun tidak aktif</strong> yang berusia &gt; 1 bulan.
+                </p>
+                <p className="text-[10px] text-emerald-600 font-mono">
+                  Waktu eksekusi: {new Date(lastPruneStats.timestamp).toLocaleTimeString()}
+                </p>
+              </div>
+            )}
+          </div>
+
+          {/* Security & Protection Details */}
+          <div className="bg-neutral-50 p-5 rounded-3xl border border-neutral-200/80 space-y-3">
+            <h5 className="text-xs font-black uppercase text-neutral-800 flex items-center space-x-2">
+              <i className="fas fa-shield-halved text-neutral-700"></i>
+              <span>Keamanan & Perlindungan Akun</span>
+            </h5>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs text-neutral-600">
+              <div className="flex items-start space-x-2 bg-white p-3 rounded-2xl border border-neutral-200/60">
+                <i className="fas fa-crown text-amber-500 text-sm mt-0.5"></i>
+                <div>
+                  <p className="font-bold text-neutral-900">Perlindungan Admin & Pemilik</p>
+                  <p className="text-[11px] text-neutral-500">Akun dengan email admin resmi atau role Super Admin terlindungi 100%.</p>
+                </div>
+              </div>
+
+              <div className="flex items-start space-x-2 bg-emerald-50/60 p-3 rounded-2xl border border-emerald-200/80">
+                <i className="fas fa-store text-emerald-600 text-sm mt-0.5"></i>
+                <div>
+                  <p className="font-bold text-emerald-950 flex items-center gap-1.5">
+                    <span>Kecuali Toko</span>
+                    <span className="text-[9px] bg-emerald-600 text-white font-black px-1.5 py-0.2 rounded-full uppercase">Dilindungi</span>
+                  </p>
+                  <p className="text-[11px] text-emerald-800">Akun toko, penjual, katalog barang, chat pesanan toko & postingan toko dikecualikan dan tidak akan dihapus.</p>
+                </div>
+              </div>
+
+              <div className="flex items-start space-x-2 bg-white p-3 rounded-2xl border border-neutral-200/60">
+                <i className="fas fa-clock-rotate-left text-neutral-700 text-sm mt-0.5"></i>
+                <div>
+                  <p className="font-bold text-neutral-900">Pembersihan Tiap 24 Jam</p>
+                  <p className="text-[11px] text-neutral-500">Sistem otomatis membersihkan postingan, chat & akun kadaluarsa &gt; 30 hari secara berkala.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* REJECTION REASON MODAL */}

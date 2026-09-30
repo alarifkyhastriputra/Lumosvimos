@@ -13,9 +13,11 @@
   "dependencies": {
     "@google/genai": "^2.18.0",
     "@types/express": "^5.0.6",
+    "@types/nodemailer": "^8.0.2",
     "esbuild": "^0.28.2",
     "express": "^5.2.1",
     "firebase": "^12.9.0",
+    "nodemailer": "^10.0.13",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "react-easy-crop": "^6.0.2",

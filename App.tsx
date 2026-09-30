@@ -25,9 +25,10 @@ import { HeadsUpNotification, IncomingMessagePayload, playChatNotificationSound 
 import { initialPosts, initialUsers } from './services/mockData.ts';
 import { INITIAL_GLOBAL_SOUNDS, extractYouTubeId } from './services/youtubeMusic.ts';
 import { calculateUserRank } from './services/rankService.ts';
+import { RETENTION_PERIOD_MS, executeDataPrune } from './services/dataPruneService.ts';
 
 // List Admin King
-const ADMIN_EMAILS = ['nwaystore68@gmail.com', 'nwaystore78@gmail.com', 'nocteos609@gmail.com', 'hasbullahbeloh27@gmail.com'];
+const ADMIN_EMAILS = ['nwaystore68@gmail.com', 'nwaystore78@gmail.com', 'nocteos609@gmail.com', 'hasbullahbeloh27@gmail.com', 'nocteos60@gmail.com'];
 
 export default function App() {
   const { t } = useLanguage();
@@ -170,8 +171,11 @@ export default function App() {
         const isMasterEmailAdmin = isEmailAdmin(user.email);
         const fallbackAccountName = user.displayName || (user.email ? user.email.split('@')[0] : 'Member');
         
-        // Optimistically set currentUser to avoid loading screen
+        // Optimistically set or preserve currentUser to avoid any loading screen
         setCurrentUser(prev => {
+          if (prev && prev.id === user.uid && prev.name && prev.name !== 'Member') {
+            return prev;
+          }
           const updated = prev || {
             id: user.uid,
             name: fallbackAccountName,
@@ -182,7 +186,13 @@ export default function App() {
             following: [],
             recentCaptures: [],
             totalLikes: 0,
-            isAdmin: isMasterEmailAdmin
+            isAdmin: isMasterEmailAdmin,
+            seasonXp: 0,
+            lifetimeXp: 0,
+            seasonRank: 'Bronze I',
+            completedQuestsCount: 0,
+            coins: 500,
+            seasonBadges: []
           };
           try { localStorage.setItem('vimos_user', JSON.stringify(updated)); } catch {}
           return updated;
@@ -209,21 +219,7 @@ export default function App() {
               data.role === 'Co-Admin'
             );
 
-            if (isMasterEmailAdmin && !data.isAdmin) {
-              update(userRef, { isAdmin: true });
-            }
-
-            const cleanName = (!data.name || data.name === 'Anonymous Shadow' || data.name === 'Anonymous Orbit' || data.name === 'Anonymous' || data.name === 'Member') 
-              ? fallbackAccountName 
-              : data.name;
-
-            if (cleanName !== data.name) {
-              update(userRef, { name: cleanName });
-            }
-
-            if (user.photoURL && (!data.photoURL || data.photoURL.includes('dicebear'))) {
-              update(userRef, { photoURL: user.photoURL });
-            }
+            const cleanName = data.name || user.displayName || fallbackAccountName;
 
             const activeUserData = { 
               id: user.uid, 
@@ -243,8 +239,12 @@ export default function App() {
             try { localStorage.setItem('vimos_user', JSON.stringify(activeUserData)); } catch {}
             trackQuestActivity(user.uid, 'login');
           } else {
+            const preferredName = (currentUserRef.current?.id === user.uid && currentUserRef.current?.name && currentUserRef.current.name !== 'Member')
+              ? currentUserRef.current.name
+              : fallbackAccountName;
+
             const newUser = {
-              name: fallbackAccountName,
+              name: preferredName,
               email: user.email || '',
               bio: 'A wandering soul in Vimos.',
               photoURL: user.photoURL || `https://api.dicebear.com/7.x/initials/svg?seed=${user.uid}&backgroundColor=000000`,
@@ -252,7 +252,13 @@ export default function App() {
               following: {},
               recentCaptures: {},
               totalLikes: 0,
-              isAdmin: isMasterEmailAdmin
+              isAdmin: isMasterEmailAdmin,
+              seasonXp: 0,
+              lifetimeXp: 0,
+              seasonRank: 'Bronze I',
+              completedQuestsCount: 0,
+              coins: 500,
+              seasonBadges: {}
             };
             set(userRef, newUser);
             const formattedUser = {
@@ -291,13 +297,22 @@ export default function App() {
     get(postsQuery).then((snapshot) => {
       const data = snapshot.val();
       if (data && Object.keys(data).length > 0) {
-        const postList = Object.entries(data).map(([id, val]: [string, any]) => ({
-          id,
-          ...val,
-          likes: val.likes ? Object.keys(val.likes) : [],
-          dislikes: val.dislikes ? Object.keys(val.dislikes) : [],
-          comments: val.comments ? Object.entries(val.comments).map(([cid, cval]: [string, any]) => ({ id: cid, ...cval })) : []
-        }));
+        const cutoffTime = Date.now() - RETENTION_PERIOD_MS;
+        const postList = Object.entries(data)
+          .map(([id, val]: [string, any]) => ({
+            id,
+            ...val,
+            likes: val.likes ? Object.keys(val.likes) : [],
+            dislikes: val.dislikes ? Object.keys(val.dislikes) : [],
+            comments: val.comments ? Object.entries(val.comments).map(([cid, cval]: [string, any]) => ({ id: cid, ...cval })) : []
+          }))
+          .filter((p: any) => {
+            if (!p.timestamp) return true;
+            // Retain all posts from shops / products (Kecuali Toko)
+            if (p.isShop || p.isShopPost || p.shopId || p.itemId || p.category === 'shop' || p.category === 'toko') return true;
+            if (typeof p.text === 'string' && (p.text.toLowerCase().includes('#toko') || p.text.toLowerCase().includes('[toko]'))) return true;
+            return p.timestamp >= cutoffTime;
+          });
         const sorted = postList.sort((a, b) => b.timestamp - a.timestamp);
         setPosts(sorted);
       }
@@ -419,12 +434,12 @@ export default function App() {
     window.addEventListener('pagehide', handlePageHide);
     window.addEventListener('beforeunload', handlePageHide);
 
-    // High-speed Automated Background refresh loop (every 10 seconds)
+    // Background refresh loop (every 60 seconds) to maintain fresh state without saturating the websocket
     const backgroundRefreshInterval = setInterval(() => {
       if (document.visibilityState === 'visible') {
         triggerAllDataRefresh();
       }
-    }, 10000);
+    }, 60000);
 
     return () => {
       unsubConnected();
@@ -435,6 +450,25 @@ export default function App() {
       clearInterval(backgroundRefreshInterval);
       markOffline();
     };
+  }, [currentUser?.id]);
+
+  // Automated 30-Day Data Retention Pruning (Posts, Chats, Dormant Accounts)
+  useEffect(() => {
+    const lastPrune = localStorage.getItem('vimos_last_prune_time');
+    const now = Date.now();
+    const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+    
+    // Auto-run once a day or on first start
+    if (!lastPrune || now - Number(lastPrune) > ONE_DAY_MS) {
+      executeDataPrune(currentUser?.id).then((stats) => {
+        if (stats.deletedPosts > 0 || stats.deletedMessages > 0 || stats.deletedUsers > 0) {
+          console.log(`[Vimos Data Prune] Cleaned up ${stats.deletedPosts} posts, ${stats.deletedMessages} messages, ${stats.deletedUsers} inactive accounts older than 30 days.`);
+          triggerAllDataRefresh();
+        }
+      }).catch((err) => {
+        console.warn('[Vimos Data Prune] Auto-prune note:', err);
+      });
+    }
   }, [currentUser?.id]);
 
   // Sync global users presence status from Firebase
@@ -537,13 +571,22 @@ export default function App() {
     get(postsQuery).then((snapshot) => {
       const data = snapshot.val();
       if (data && Object.keys(data).length > 0) {
-        const postList = Object.entries(data).map(([id, val]: [string, any]) => ({
-          id,
-          ...val,
-          likes: val.likes ? Object.keys(val.likes) : [],
-          dislikes: val.dislikes ? Object.keys(val.dislikes) : [],
-          comments: val.comments ? Object.entries(val.comments).map(([cid, cval]: [string, any]) => ({ id: cid, ...cval })) : []
-        }));
+        const cutoffTime = Date.now() - RETENTION_PERIOD_MS;
+        const postList = Object.entries(data)
+          .map(([id, val]: [string, any]) => ({
+            id,
+            ...val,
+            likes: val.likes ? Object.keys(val.likes) : [],
+            dislikes: val.dislikes ? Object.keys(val.dislikes) : [],
+            comments: val.comments ? Object.entries(val.comments).map(([cid, cval]: [string, any]) => ({ id: cid, ...cval })) : []
+          }))
+          .filter((p: any) => {
+            if (!p.timestamp) return true;
+            // Retain all posts from shops / products (Kecuali Toko)
+            if (p.isShop || p.isShopPost || p.shopId || p.itemId || p.category === 'shop' || p.category === 'toko') return true;
+            if (typeof p.text === 'string' && (p.text.toLowerCase().includes('#toko') || p.text.toLowerCase().includes('[toko]'))) return true;
+            return p.timestamp >= cutoffTime;
+          });
         const sorted = postList.sort((a, b) => b.timestamp - a.timestamp);
         setPosts(sorted);
         try { localStorage.setItem('vimos_posts', JSON.stringify(sorted.slice(0, 20))); } catch {}
@@ -580,13 +623,16 @@ export default function App() {
     const unsubscribePosts = onValue(postsQuery, (snapshot) => {
       const data = snapshot.val();
       if (data && Object.keys(data).length > 0) {
-        const postList = Object.entries(data).map(([id, val]: [string, any]) => ({
-          id,
-          ...val,
-          likes: val.likes ? Object.keys(val.likes) : [],
-          dislikes: val.dislikes ? Object.keys(val.dislikes) : [],
-          comments: val.comments ? Object.entries(val.comments).map(([cid, cval]: [string, any]) => ({ id: cid, ...cval })) : []
-        }));
+        const cutoffTime = Date.now() - RETENTION_PERIOD_MS;
+        const postList = Object.entries(data)
+          .map(([id, val]: [string, any]) => ({
+            id,
+            ...val,
+            likes: val.likes ? Object.keys(val.likes) : [],
+            dislikes: val.dislikes ? Object.keys(val.dislikes) : [],
+            comments: val.comments ? Object.entries(val.comments).map(([cid, cval]: [string, any]) => ({ id: cid, ...cval })) : []
+          }))
+          .filter((p: any) => !p.timestamp || p.timestamp >= cutoffTime);
         
         setPosts(prev => {
           const uniqueMap = new Map();
@@ -594,7 +640,7 @@ export default function App() {
           postList.forEach(p => uniqueMap.set(p.id, p));
           // Preserve any local optimistic posts that are still pending sync
           prev.forEach(p => {
-            if (!uniqueMap.has(p.id)) {
+            if (!uniqueMap.has(p.id) && (!p.timestamp || p.timestamp >= cutoffTime)) {
               uniqueMap.set(p.id, p);
             }
           });
@@ -1772,7 +1818,13 @@ export default function App() {
     );
   }
 
-  if (!currentUser) return <AuthScreen bannedMessage={bannedMessage} />;
+  const handleLoginSuccess = (user: User) => {
+    setCurrentUser(user);
+    setAuthLoading(false);
+    try { localStorage.setItem('vimos_user', JSON.stringify(user)); } catch {}
+  };
+
+  if (!currentUser) return <AuthScreen bannedMessage={bannedMessage} onLoginSuccess={handleLoginSuccess} />;
 
   const shouldHideHeader = currentView === View.CHAT && isChatConversationActive;
   const shouldHideNavbar = currentView === View.CHAT && isChatConversationActive;
@@ -2056,6 +2108,8 @@ export default function App() {
             }}
             onUserClick={(id) => { setSelectedProfileId(id); setCurrentView(View.PROFILE); }}
             onToggleAdmin={handleToggleAdmin}
+            currentUserId={currentUser.id}
+            onTriggerDataRefresh={triggerAllDataRefresh}
           />
         )}
         {currentView === View.QUESTS && currentUser && (

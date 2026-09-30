@@ -208,7 +208,20 @@ const translations: Record<Language, Record<string, string>> = {
     'link_google_badge_verified': 'Terverifikasi Google',
     'auth_google_continue': 'Lanjutkan dengan Google',
     'auth_or_divider': 'ATAU',
-    'auth_must_link_google_hint': 'Catatan: Pendaftaran akun mewajibkan penautan akun Google agar dapat mengakses fitur Vimos.'
+    'auth_must_link_google_hint': 'Catatan: Pendaftaran akun mewajibkan penautan akun Google agar dapat mengakses fitur Vimos.',
+    'auth_otp_title': 'Verifikasi Kode OTP Email',
+    'auth_otp_tagline': 'Keamanan & Autentikasi Akun',
+    'auth_otp_desc': 'Kami telah mengirimkan 6 digit kode verifikasi ke email Anda. Silakan cek kotak masuk atau folder spam.',
+    'auth_otp_label': 'Masukkan 6 Digit Kode OTP',
+    'auth_otp_resend': 'Kirim Ulang Kode OTP',
+    'auth_otp_resend_wait': 'Kirim ulang dalam',
+    'auth_otp_verify_btn': 'Verifikasi & Masuk Akun',
+    'auth_otp_change_email': 'Ganti Email / Kembali',
+    'auth_otp_sending': 'Mengirim Kode OTP...',
+    'auth_otp_verifying': 'Memverifikasi Kode OTP...',
+    'auth_otp_success_sent': 'Kode OTP berhasil dikirimkan!',
+    'auth_otp_error_empty': 'Silakan masukkan 6 digit kode OTP secara lengkap.',
+    'auth_otp_error_wrong': 'Kode OTP salah atau telah kadaluarsa.'
   },
   en: {
     'home': 'Home',
@@ -409,7 +422,20 @@ const translations: Record<Language, Record<string, string>> = {
     'link_google_badge_verified': 'Google Verified',
     'auth_google_continue': 'Continue with Google',
     'auth_or_divider': 'OR',
-    'auth_must_link_google_hint': 'Note: After registration, linking a Google account is required to access Vimos features.'
+    'auth_must_link_google_hint': 'Note: After registration, linking a Google account is required to access Vimos features.',
+    'auth_otp_title': 'Email OTP Verification',
+    'auth_otp_tagline': 'Security & Account Authentication',
+    'auth_otp_desc': 'We sent a 6-digit verification code to your email. Please check your inbox or spam folder.',
+    'auth_otp_label': 'Enter 6-Digit OTP Code',
+    'auth_otp_resend': 'Resend OTP Code',
+    'auth_otp_resend_wait': 'Resend in',
+    'auth_otp_verify_btn': 'Verify & Enter Account',
+    'auth_otp_change_email': 'Change Email / Back',
+    'auth_otp_sending': 'Sending OTP Code...',
+    'auth_otp_verifying': 'Verifying OTP Code...',
+    'auth_otp_success_sent': 'OTP code sent successfully!',
+    'auth_otp_error_empty': 'Please enter the complete 6-digit OTP code.',
+    'auth_otp_error_wrong': 'Invalid or expired OTP code.'
   },
   ja: {
     'home': 'ホーム',
@@ -610,7 +636,20 @@ const translations: Record<Language, Record<string, string>> = {
     'link_google_badge_verified': 'Google認証済み',
     'auth_google_continue': 'Googleで続行',
     'auth_or_divider': 'または',
-    'auth_must_link_google_hint': '注意：アカウント登録後、Vimos機能の利用にはGoogle連携が必須です。'
+    'auth_must_link_google_hint': '注意：アカウント登録後、Vimos機能の利用にはGoogle連携が必須です。',
+    'auth_otp_title': 'メールOTP認証',
+    'auth_otp_tagline': 'セキュリティ・アカウント認証',
+    'auth_otp_desc': '6桁の認証コードをメールに送信しました。受信トレイまたは迷惑メールフォルダをご確認ください。',
+    'auth_otp_label': '6桁のOTPコードを入力',
+    'auth_otp_resend': 'コードを再送信',
+    'auth_otp_resend_wait': '再送信まで',
+    'auth_otp_verify_btn': '認証してアカウント作成を完了',
+    'auth_otp_change_email': 'メールアドレスを変更 / 戻る',
+    'auth_otp_sending': 'OTPコード送信中...',
+    'auth_otp_verifying': '認証中...',
+    'auth_otp_success_sent': 'OTPコードを送信しました！',
+    'auth_otp_error_empty': '6桁のOTPコードを入力してください。',
+    'auth_otp_error_wrong': 'OTPコードが無効または期限切れです。'
   },
   zh: {
     'home': '首页',
@@ -811,7 +850,20 @@ const translations: Record<Language, Record<string, string>> = {
     'link_google_badge_verified': '已通过Google验证',
     'auth_google_continue': '使用Google继续',
     'auth_or_divider': '或',
-    'auth_must_link_google_hint': '注意：注册账号后需关联Google账号方可访问Vimos各项功能。'
+    'auth_must_link_google_hint': '注意：注册账号后需关联Google账号方可访问Vimos各项功能。',
+    'auth_otp_title': '邮箱OTP验证码',
+    'auth_otp_tagline': '安全与账户验证',
+    'auth_otp_desc': '我们已将6位验证码发送至您的邮箱，请检查收件箱或垃圾邮件。',
+    'auth_otp_label': '输入6位OTP验证码',
+    'auth_otp_resend': '重新发送验证码',
+    'auth_otp_resend_wait': '重新发送倒计时',
+    'auth_otp_verify_btn': '验证并进入账户',
+    'auth_otp_change_email': '更改邮箱 / 返回',
+    'auth_otp_sending': '正在发送验证码...',
+    'auth_otp_verifying': '正在验证...',
+    'auth_otp_success_sent': '验证码已发送至您的邮箱！',
+    'auth_otp_error_empty': '请输入完整的6位验证码。',
+    'auth_otp_error_wrong': '验证码错误或已过期。'
   }
 };
 
